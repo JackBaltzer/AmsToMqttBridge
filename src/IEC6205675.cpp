@@ -1,8 +1,9 @@
 #include "IEC6205675.h"
 #include "lwip/def.h"
 #include "Timezone.h"
+#include "ntohll.h"
 
-IEC6205675::IEC6205675(const char* d, uint8_t useMeterType, uint8_t distributionSystem, CosemDateTime packageTimestamp, HDLCConfig* hc) {
+IEC6205675::IEC6205675(const char* d, uint8_t useMeterType, MeterConfig* meterConfig, DataParserContext &ctx) {
     double val;
     char str[64];
 
@@ -10,7 +11,7 @@ IEC6205675::IEC6205675(const char* d, uint8_t useMeterType, uint8_t distribution
     TimeChangeRule CET = {"CET ", Last, Sun, Oct, 3, 60};
     Timezone tz(CEST, CET);
 
-    this->packageTimestamp = getTimestamp(packageTimestamp);
+    this->packageTimestamp = ctx.timestamp;
 
     val = getNumber(AMS_OBIS_ACTIVE_IMPORT, sizeof(AMS_OBIS_ACTIVE_IMPORT), ((char *) (d)));
     if(val == NOVALUE) {
@@ -97,8 +98,10 @@ IEC6205675::IEC6205675(const char* d, uint8_t useMeterType, uint8_t distribution
                 }
 
                 if(listType >= 2 && memcmp(meterModel.c_str(), "MA304T3", 7) == 0) {
-                    l2current = (((activeImportPower - activeExportPower) * sqrt(3)) - (l1voltage * l1current) - (l3voltage * l3current)) / l2voltage;
                     l2voltage = sqrt(pow(l1voltage - l3voltage * cos(60 * (PI/180)), 2) + pow(l3voltage * sin(60 * (PI/180)),2));
+                    if(l2voltage > 0) {
+                        l2current = (((activeImportPower - activeExportPower) * sqrt(3)) - (l1voltage * l1current) - (l3voltage * l3current)) / l2voltage;
+                    }
                 }
 
                 if(listType == 3) {
@@ -107,7 +110,7 @@ IEC6205675::IEC6205675(const char* d, uint8_t useMeterType, uint8_t distribution
                         case CosemTypeOctetString: {
                             if(data->oct.length == 0x0C) {
                                 AmsOctetTimestamp* amst = (AmsOctetTimestamp*) data;
-                                time_t ts = getTimestamp(amst->dt);
+                                time_t ts = decodeCosemDateTime(amst->dt);
                                 meterTimestamp = tz.toUTC(ts);
                             }
                         }
@@ -140,11 +143,13 @@ IEC6205675::IEC6205675(const char* d, uint8_t useMeterType, uint8_t distribution
 
         meterType = AmsTypeUnknown;
         CosemData* version = findObis(AMS_OBIS_VERSION, sizeof(AMS_OBIS_VERSION), d);
-        if(version != NULL && version->base.type == CosemTypeString) {
+        if(version != NULL && (version->base.type == CosemTypeString || version->base.type == CosemTypeOctetString)) {
             if(memcmp(version->str.data, "AIDON", 5) == 0) {
                 meterType = AmsTypeAidon;
             } else if(memcmp(version->str.data, "Kamstrup", 8) == 0) {
                 meterType = AmsTypeKamstrup;
+            } else if(memcmp(version->str.data, "KFM", 3) == 0) {
+                meterType = AmsTypeKaifa;
             }
         } else {
             version = getCosemDataAt(1, ((char *) (d)));
@@ -155,8 +160,8 @@ IEC6205675::IEC6205675(const char* d, uint8_t useMeterType, uint8_t distribution
             } 
         }
         // Try system title
-        if(meterType == AmsTypeUnknown && hc != NULL) {
-            if(memcmp(hc->system_title, "SAGY", 4)) {
+        if(meterType == AmsTypeUnknown) {
+            if(memcmp(ctx.system_title, "SAGY", 4) == 0) {
                 meterType = AmsTypeSagemcom;
             }
         }
@@ -262,8 +267,10 @@ IEC6205675::IEC6205675(const char* d, uint8_t useMeterType, uint8_t distribution
         CosemData* meterTs = findObis(AMS_OBIS_METER_TIMESTAMP, sizeof(AMS_OBIS_METER_TIMESTAMP), ((char *) (d)));
         if(meterTs != NULL) {
             AmsOctetTimestamp* amst = (AmsOctetTimestamp*) meterTs;
-            time_t ts = getTimestamp(amst->dt);
-            if(meterType == AmsTypeKamstrup || meterType == AmsTypeAidon) {
+            time_t ts = decodeCosemDateTime(amst->dt);
+            if(meterType == AmsTypeAidon) {
+                meterTimestamp = ts - 3600;
+            } else if(meterType == AmsTypeKamstrup) {
                 meterTimestamp = tz.toUTC(ts);
             } else {
                 meterTimestamp = ts;
@@ -272,19 +279,55 @@ IEC6205675::IEC6205675(const char* d, uint8_t useMeterType, uint8_t distribution
 
         val = getNumber(AMS_OBIS_POWER_FACTOR, sizeof(AMS_OBIS_POWER_FACTOR), ((char *) (d)));
         if(val != NOVALUE) {
+            listType = 4;
             powerFactor = val;
         }
         val = getNumber(AMS_OBIS_POWER_FACTOR_L1, sizeof(AMS_OBIS_POWER_FACTOR_L1), ((char *) (d)));
         if(val != NOVALUE) {
+            listType = 4;
             l1PowerFactor = val;
         }
         val = getNumber(AMS_OBIS_POWER_FACTOR_L2, sizeof(AMS_OBIS_POWER_FACTOR_L2), ((char *) (d)));
         if(val != NOVALUE) {
+            listType = 4;
             l2PowerFactor = val;
         }
         val = getNumber(AMS_OBIS_POWER_FACTOR_L3, sizeof(AMS_OBIS_POWER_FACTOR_L3), ((char *) (d)));
         if(val != NOVALUE) {
+            listType = 4;
             l3PowerFactor = val;
+        }
+
+        val = getNumber(AMS_OBIS_ACTIVE_IMPORT_L1, sizeof(AMS_OBIS_ACTIVE_IMPORT_L1), ((char *) (d)));
+        if (val != NOVALUE) {
+            listType = 4;
+            l1activeImportPower = val;
+        }
+        val = getNumber(AMS_OBIS_ACTIVE_IMPORT_L2, sizeof(AMS_OBIS_ACTIVE_IMPORT_L2), ((char *) (d)));
+        if (val != NOVALUE) {
+            listType = 4;
+            l2activeImportPower = val;
+        }
+        val = getNumber(AMS_OBIS_ACTIVE_IMPORT_L3, sizeof(AMS_OBIS_ACTIVE_IMPORT_L3), ((char *) (d)));
+        if (val != NOVALUE) {
+            listType = 4;
+            l3activeImportPower = val;
+        }
+
+        val = getNumber(AMS_OBIS_ACTIVE_EXPORT_L1, sizeof(AMS_OBIS_ACTIVE_EXPORT_L1), ((char *) (d)));
+        if (val != NOVALUE) {
+            listType = 4;
+            l1activeExportPower = val;
+        }
+        val = getNumber(AMS_OBIS_ACTIVE_EXPORT_L2, sizeof(AMS_OBIS_ACTIVE_EXPORT_L2), ((char *) (d)));
+        if (val != NOVALUE) {
+            listType = 4;
+            l2activeExportPower = val;
+        }
+        val = getNumber(AMS_OBIS_ACTIVE_EXPORT_L3, sizeof(AMS_OBIS_ACTIVE_EXPORT_L3), ((char *) (d)));
+        if (val != NOVALUE) {
+            listType = 4;
+            l3activeExportPower = val;
         }
 
         if(meterType == AmsTypeKamstrup) {
@@ -312,7 +355,7 @@ IEC6205675::IEC6205675(const char* d, uint8_t useMeterType, uint8_t distribution
             CosemData* meterTs = getCosemDataAt(1, ((char *) (d)));
             if(meterTs != NULL) {
                 AmsOctetTimestamp* amst = (AmsOctetTimestamp*) meterTs;
-                time_t ts = getTimestamp(amst->dt);
+                time_t ts = decodeCosemDateTime(amst->dt);
                 meterTimestamp = ts;
             }
 
@@ -320,18 +363,56 @@ IEC6205675::IEC6205675(const char* d, uint8_t useMeterType, uint8_t distribution
             if(mid != NULL) {
                 switch(mid->base.type) {
                     case CosemTypeString:
-                        memcpy(&meterId, mid->str.data, mid->str.length);
-                        meterId[mid->str.length] = 0;
+                        memcpy(str, mid->oct.data, mid->oct.length);
+                        str[mid->oct.length] = 0x00;
+                        meterId = String(str);
                         break;
                     case CosemTypeOctetString:
-                        memcpy(&meterId, mid->oct.data, mid->oct.length);
-                        meterId[mid->oct.length] = 0;
+                        memcpy(str, mid->str.data, mid->str.length);
+                        str[mid->str.length] = 0x00;
+                        meterId = String(str);
                         break;
                 }
             }
+        } else if(meterType == AmsTypeKaifa) {
+            if(l1current != 0)
+                l1current /= 1000;
+            if(l2current != 0)
+                l2current /= 1000;
+            if(l3current != 0)
+                l3current /= 1000;
+            if(l1voltage != 0)
+                l1voltage /= 10;
+            if(l2voltage != 0)
+                l2voltage /= 10;
+            if(l3voltage != 0)
+                l3voltage /= 10;
         }
 
         lastUpdateMillis = millis();
+    }
+
+    if(meterConfig->wattageMultiplier > 0) {
+        activeImportPower = activeImportPower > 0 ? activeImportPower * (meterConfig->wattageMultiplier / 1000.0) : 0;
+        activeExportPower = activeExportPower > 0 ? activeExportPower * (meterConfig->wattageMultiplier / 1000.0) : 0;
+        reactiveImportPower = reactiveImportPower > 0 ? reactiveImportPower * (meterConfig->wattageMultiplier / 1000.0) : 0;
+        reactiveExportPower = reactiveExportPower > 0 ? reactiveExportPower * (meterConfig->wattageMultiplier / 1000.0) : 0;
+    }
+    if(meterConfig->voltageMultiplier > 0) {
+        l1voltage = l1voltage > 0 ? l1voltage * (meterConfig->voltageMultiplier / 1000.0) : 0;
+        l2voltage = l2voltage > 0 ? l2voltage * (meterConfig->voltageMultiplier / 1000.0) : 0;
+        l3voltage = l3voltage > 0 ? l3voltage * (meterConfig->voltageMultiplier / 1000.0) : 0;
+    }
+    if(meterConfig->amperageMultiplier > 0) {
+        l1current = l1current > 0 ? l1current * (meterConfig->amperageMultiplier / 1000.0) : 0;
+        l2current = l2current > 0 ? l2current * (meterConfig->amperageMultiplier / 1000.0) : 0;
+        l3current = l3current > 0 ? l3current * (meterConfig->amperageMultiplier / 1000.0) : 0;
+    }
+    if(meterConfig->accumulatedMultiplier > 0) {
+        activeImportCounter = activeImportCounter > 0 ? activeImportCounter * (meterConfig->accumulatedMultiplier / 1000.0) : 0;
+        activeExportCounter = activeExportCounter > 0 ? activeExportCounter * (meterConfig->accumulatedMultiplier / 1000.0) : 0;
+        reactiveImportCounter = reactiveImportCounter > 0 ? reactiveImportCounter * (meterConfig->accumulatedMultiplier / 1000.0) : 0;
+        reactiveExportCounter = reactiveExportCounter > 0 ? reactiveExportCounter * (meterConfig->accumulatedMultiplier / 1000.0) : 0;
     }
 
     threePhase = l1voltage > 0 && l2voltage > 0 && l3voltage > 0;
@@ -339,7 +420,7 @@ IEC6205675::IEC6205675(const char* d, uint8_t useMeterType, uint8_t distribution
         twoPhase = (l1voltage > 0 && l2voltage > 0) || (l2voltage > 0 && l3voltage > 0) || (l3voltage > 0  && l1voltage > 0);
 
     // Special case for Norwegian IT/TT meters that does not report all values
-    if(distributionSystem == 1) {
+    if(meterConfig->distributionSystem == 1) {
         if(threePhase) {
             if(l2current == 0.0 && l1current > 0.0 && l3current > 0.0) {
                 l2current = (((activeImportPower - activeExportPower) * sqrt(3)) - (l1voltage * l1current) - (l3voltage * l3current)) / l2voltage;
@@ -358,7 +439,7 @@ CosemData* IEC6205675::getCosemDataAt(uint8_t index, const char* ptr) {
     CosemData* item = (CosemData*) ptr;
     int i = 0;
     char* pos = (char*) ptr;
-    do {
+    while(pos-ptr < 900) {
         item = (CosemData*) pos;
         if(i == index) return item;
         switch(item->base.type) {
@@ -371,21 +452,25 @@ CosemData* IEC6205675::getCosemDataAt(uint8_t index, const char* ptr) {
                 pos += 2 + item->base.length;
                 break;
             case CosemTypeLongSigned:
-                pos += 5;
-                break;
             case CosemTypeLongUnsigned:
                 pos += 3;
                 break;
+            case CosemTypeDLongSigned:
             case CosemTypeDLongUnsigned:
                 pos += 5;
                 break;
+            case CosemTypeLong64Signed:
+            case CosemTypeLong64Unsigned:
+                pos += 9;
+                break;
             case CosemTypeNull:
-                return NULL;
+                pos += 1;
+                break;
             default:
                 pos += 2;
         }
         i++;
-    } while(item->base.type != HDLC_FLAG);
+    }
     return NULL;
 }
 
@@ -393,7 +478,7 @@ CosemData* IEC6205675::findObis(uint8_t* obis, int matchlength, const char* ptr)
     CosemData* item = (CosemData*) ptr;
     int ret = 0;
     char* pos = (char*) ptr;
-    do {
+    while(pos-ptr < 900) {
         item = (CosemData*) pos;
         if(ret == 1) return item;
         switch(item->base.type) {
@@ -414,20 +499,24 @@ CosemData* IEC6205675::findObis(uint8_t* obis, int matchlength, const char* ptr)
                 break;
             }
             case CosemTypeLongSigned:
-                pos += 5;
-                break;
             case CosemTypeLongUnsigned:
                 pos += 3;
                 break;
+            case CosemTypeDLongSigned:
             case CosemTypeDLongUnsigned:
                 pos += 5;
                 break;
+            case CosemTypeLong64Signed:
+            case CosemTypeLong64Unsigned:
+                pos += 9;
+                break;
             case CosemTypeNull:
-                return NULL;
+                pos += 1;
+                break;
             default:
                 pos += 2;
         }
-    } while(item->base.type != HDLC_FLAG);
+    }
     return NULL;
 }
 
@@ -458,10 +547,22 @@ double IEC6205675::getNumber(CosemData* item) {
         double ret = 0.0;
         char* pos = ((char*) item);
         switch(item->base.type) {
+            case CosemTypeLongSigned: {
+                int16_t i16 = ntohs(item->ls.data);
+                ret = i16;
+                pos += 3;
+                break;
+            }
             case CosemTypeLongUnsigned: {
                 uint16_t u16 = ntohs(item->lu.data);
                 ret = u16;
                 pos += 3;
+                break;
+            }
+            case CosemTypeDLongSigned: {
+                int32_t i32 = ntohl(item->dlu.data);
+                ret = i32;
+                pos += 5;
                 break;
             }
             case CosemTypeDLongUnsigned: {
@@ -470,10 +571,16 @@ double IEC6205675::getNumber(CosemData* item) {
                 pos += 5;
                 break;
             }
-            case CosemTypeLongSigned: {
-                int16_t i16 = ntohs(item->ls.data);
-                ret = i16;
-                pos += 3;
+            case CosemTypeLong64Signed: {
+                int64_t i64 = ntohll(item->l64s.data);
+                ret = i64;
+                pos += 9;
+                break;
+            }
+            case CosemTypeLong64Unsigned: {
+                uint64_t u64 = ntohll(item->l64u.data);
+                ret = u64;
+                pos += 9;
                 break;
             }
         }
@@ -495,31 +602,10 @@ time_t IEC6205675::getTimestamp(uint8_t* obis, int matchlength, const char* ptr)
             case CosemTypeOctetString: {
                 if(item->oct.length == 0x0C) {
                     AmsOctetTimestamp* ts = (AmsOctetTimestamp*) item;
-                    return getTimestamp(ts->dt);
+                    return decodeCosemDateTime(ts->dt);
                 }
             }
         }
     }
     return 0;
-}
-
-time_t IEC6205675::getTimestamp(CosemDateTime timestamp) {
-    tmElements_t tm;
-    uint16_t year = ntohs(timestamp.year);
-    if(year < 1970) return 0;
-    tm.Year = year - 1970;
-    tm.Month = timestamp.month;
-    tm.Day = timestamp.dayOfMonth;
-    tm.Hour = timestamp.hour;
-    tm.Minute = timestamp.minute;
-    tm.Second = timestamp.second;
-
-    //Serial.printf("\nY: %d, M: %d, D: %d, h: %d, m: %d, s: %d, deviation: 0x%2X, status: 0x%1X\n", tm.Year, tm.Month, tm.Day, tm.Hour, tm.Minute, tm.Second, timestamp.deviation, timestamp.status);
-
-    time_t time = makeTime(tm);
-    int16_t deviation = ntohs(timestamp.deviation);
-    if(deviation >= -720 && deviation <= 720) {
-        time -= deviation * 60;
-    }
-    return time;
 }

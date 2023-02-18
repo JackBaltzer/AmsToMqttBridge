@@ -7,10 +7,14 @@
 .vscode
 .pio
 platformio-user.ini
-/src/version.h
+/lib/AmsConfiguration/include/version.h
 /src/web/root
 /src/AmsToMqttBridge.ino.cpp
 /test
 /web/test.html
 /sdkconfig
 /.tmp
+/*.zip
+node_modules
+/gui/dist
+/scripts/*dev
