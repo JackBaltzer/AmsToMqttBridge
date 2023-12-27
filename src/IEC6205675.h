@@ -15,14 +15,14 @@ struct AmsOctetTimestamp {
 
 class IEC6205675 : public AmsData {
 public:
-    IEC6205675(const char* payload, uint8_t useMeterType, MeterConfig* meterConfig, DataParserContext &ctx);
+    IEC6205675(const char* payload, uint8_t useMeterType, MeterConfig* meterConfig, DataParserContext &ctx, AmsData &state);
 
 private:
     CosemData* getCosemDataAt(uint8_t index, const char* ptr);
     CosemData* findObis(uint8_t* obis, int matchlength, const char* ptr);
     uint8_t getString(uint8_t* obis, int matchlength, const char* ptr, char* target);
-    double getNumber(uint8_t* obis, int matchlength, const char* ptr);
-    double getNumber(CosemData*);
+    float getNumber(uint8_t* obis, int matchlength, const char* ptr);
+    float getNumber(CosemData*);
     time_t getTimestamp(uint8_t* obis, int matchlength, const char* ptr);
 
     uint8_t AMS_OBIS_VERSION[4]                 = {  0, 2, 129, 255 };

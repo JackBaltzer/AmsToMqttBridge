@@ -1,9 +1,10 @@
 <script>
-    import { metertype, boardtype, isBusPowered } from './Helpers.js';
+    import { metertype, boardtype, isBusPowered, getResetReason, httpError } from './Helpers.js';
     import { getSysinfo, gitHubReleaseStore, sysinfoStore } from './DataStores.js';
     import { upgrade, getNextVersion, upgradeWarningText } from './UpgradeHelper';
     import DownloadIcon from './DownloadIcon.svelte';
     import { Link } from 'svelte-navigator';
+    import Clock from './Clock.svelte';
     import Mask from './Mask.svelte';
   
     export let data;
@@ -28,9 +29,6 @@
         name: 'GPIO',
         key: 'ig'
     },{
-        name: 'Domoticz',
-        key: 'id'
-    },{
         name: 'NTP',
         key: 'in'
     },{
@@ -53,7 +51,7 @@
                     s.upgrading = true;
                     return s;
                 });
-                upgrade(nextVersion);
+                upgrade(nextVersion.tag_name);
             }
         }
     }
@@ -90,7 +88,7 @@
     <div class="cnt">
         <strong class="text-sm">Device information</strong>
         <div class="my-2">
-            Chip: {sysinfo.chip}
+            Chip: {sysinfo.chip} ({sysinfo.cpu}MHz)
         </div>
         <div class="my-2">
             Device: <Link to="/vendor">{boardtype(sysinfo.chip, sysinfo.board)}</Link>
@@ -101,6 +99,17 @@
         {#if sysinfo.apmac && sysinfo.apmac != sysinfo.mac}
         <div class="my-2">
             AP MAC: {sysinfo.apmac}
+        </div>
+        <div class="my-2">
+            Last boot:
+            {#if data.u > 0}
+            <Clock timestamp={new Date(new Date().getTime() - (data.u * 1000))} fullTimeColor="" />
+            {:else}
+            -
+            {/if}
+        </div>
+        <div class="my-2">
+            Reason: {getResetReason(sysinfo)} ({sysinfo.boot_reason}/{sysinfo.ex_cause})
         </div>
         {/if}
         <div class="my-2">
@@ -117,10 +126,10 @@
             Manufacturer: {metertype(sysinfo.meter.mfg)}
         </div>
         <div class="my-2">
-            Model: {sysinfo.meter.model}
+            Model: {sysinfo.meter.model ? sysinfo.meter.model : "unknown"}
         </div>
         <div class="my-2">
-            ID: {sysinfo.meter.id}
+            ID: {sysinfo.meter.id ? sysinfo.meter.id : "unknown"}
         </div>
     </div>
     {/if}
@@ -137,7 +146,7 @@
             Gateway: {sysinfo.net.gw}
         </div>
         <div class="my-2">
-            DNS: {sysinfo.net.dns1} {#if sysinfo.net.dns2 && sysinfo.net.dns2 != '0.0.0.0'}/ {sysinfo.net.dns2}{/if}
+            DNS: {sysinfo.net.dns1} {#if sysinfo.net.dns2}/ {sysinfo.net.dns2}{/if}
         </div>
     </div>
     {/if}
@@ -146,11 +155,16 @@
         <div class="my-2">
             Installed version: {sysinfo.version}
         </div>
+        {#if sysinfo.upgrade.t && sysinfo.upgrade.t != sysinfo.version}
+        <div class="my-2">
+            <div class="bd-yellow">Previous upgrade attempt from {sysinfo.upgrade.f} to {sysinfo.upgrade.t} failed. {httpError(sysinfo.upgrade.e)}</div>
+        </div>
+        {/if}
         {#if nextVersion}
             <div class="my-2 flex">
                 Latest version: 
                 <a href={nextVersion.html_url} class="ml-2 text-blue-600 hover:text-blue-800" target='_blank' rel="noreferrer">{nextVersion.tag_name}</a>
-                {#if (sysinfo.security == 0 || data.a) && sysinfo.fwconsent === 1 && nextVersion && nextVersion.tag_name}
+                {#if (sysinfo.security == 0 || data.a) && sysinfo.fwconsent === 1 && nextVersion && nextVersion.tag_name != sysinfo.version}
                 <div class="flex-none ml-2 text-green-500" title="Install this version">
                     <button on:click={askUpgrade}><DownloadIcon/></button>
                 </div>
@@ -183,7 +197,7 @@
     </div>
     {#if sysinfo.security == 0 || data.a}
     <div class="cnt">
-        <strong class="text-sm">Configuration</strong>
+        <strong class="text-sm">Backup & restore</strong>
         <form method="get" action="/configfile.cfg" autocomplete="off">
             <div class="grid grid-cols-2">
                 {#each cfgItems as el}

@@ -1,5 +1,6 @@
 #include "AmsWebServer.h"
 #include "AmsWebHeaders.h"
+#include "FirmwareVersion.h"
 #include "base64.h"
 #include "hexutils.h"
 
@@ -27,21 +28,41 @@
 #include "html/conf_debug_json.h"
 #include "html/conf_gpio_json.h"
 #include "html/conf_domoticz_json.h"
+#include "html/conf_ha_json.h"
 #include "html/conf_ui_json.h"
+#include "html/conf_cloud_json.h"
 #include "html/firmware_html.h"
-
-#include "version.h"
 
 #if defined(ESP32)
 #include <esp_task_wdt.h>
 #include <esp_wifi.h>
+#include <esp32/clk.h>
 #endif
 
 
-AmsWebServer::AmsWebServer(uint8_t* buf, RemoteDebug* Debug, HwTools* hw) {
+#if CONFIG_IDF_TARGET_ESP32 // ESP32/PICO-D4
+#include "esp32/rom/rtc.h"
+#elif CONFIG_IDF_TARGET_ESP32S2
+#include "esp32s2/rom/rtc.h"
+#elif CONFIG_IDF_TARGET_ESP32C3
+#include "esp32c3/rom/rtc.h"
+#elif CONFIG_IDF_TARGET_ESP32S3
+#include "esp32s3/rom/rtc.h"
+#endif
+
+AmsWebServer::AmsWebServer(uint8_t* buf, RemoteDebug* Debug, HwTools* hw, ResetDataContainer* rdc) {
 	this->debugger = Debug;
 	this->hw = hw;
 	this->buf = (char*) buf;
+	this->rdc = rdc;
+	if(rdc->magic != 0x4a) {
+		rdc->last_cause = 0;
+		rdc->cause = 0;
+		rdc->magic = 0x4a;
+	} else {
+		rdc->last_cause = rdc->cause;
+		rdc->cause = 0;
+	}
 }
 
 void AmsWebServer::setup(AmsConfiguration* config, GpioConfig* gpioConfig, MeterConfig* meterConfig, AmsData* meterState, AmsDataStorage* ds, EnergyAccounting* ea) {
@@ -53,9 +74,9 @@ void AmsWebServer::setup(AmsConfiguration* config, GpioConfig* gpioConfig, Meter
 	this->ea = ea;
 
 	server.on(F("/"), HTTP_GET, std::bind(&AmsWebServer::indexHtml, this));
-	snprintf_P(buf, 32, PSTR("/index-%s.js"), VERSION);
+	snprintf_P(buf, 32, PSTR("/index-%s.js"), FirmwareVersion::VersionString);
 	server.on(buf, HTTP_GET, std::bind(&AmsWebServer::indexJs, this));
-	snprintf_P(buf, 32, PSTR("/index-%s.css"), VERSION);
+	snprintf_P(buf, 32, PSTR("/index-%s.css"), FirmwareVersion::VersionString);
 	server.on(buf, HTTP_GET, std::bind(&AmsWebServer::indexCss, this));
 
 	server.on(F("/configuration"), HTTP_GET, std::bind(&AmsWebServer::indexHtml, this));
@@ -89,9 +110,9 @@ void AmsWebServer::setup(AmsConfiguration* config, GpioConfig* gpioConfig, Meter
 
 	server.on(F("/robots.txt"), HTTP_GET, std::bind(&AmsWebServer::robotstxt, this));
 
-	server.on(F("/mqtt-ca"), HTTP_POST, std::bind(&AmsWebServer::firmwarePost, this), std::bind(&AmsWebServer::mqttCaUpload, this));
-	server.on(F("/mqtt-cert"), HTTP_POST, std::bind(&AmsWebServer::firmwarePost, this), std::bind(&AmsWebServer::mqttCertUpload, this));
-	server.on(F("/mqtt-key"), HTTP_POST, std::bind(&AmsWebServer::firmwarePost, this), std::bind(&AmsWebServer::mqttKeyUpload, this));
+	server.on(F("/mqtt-ca"), HTTP_POST, std::bind(&AmsWebServer::mqttCaDelete, this), std::bind(&AmsWebServer::mqttCaUpload, this));
+	server.on(F("/mqtt-cert"), HTTP_POST, std::bind(&AmsWebServer::mqttCertDelete, this), std::bind(&AmsWebServer::mqttCertUpload, this));
+	server.on(F("/mqtt-key"), HTTP_POST, std::bind(&AmsWebServer::mqttKeyDelete, this), std::bind(&AmsWebServer::mqttKeyUpload, this));
 
 	server.on(F("/configfile"), HTTP_POST, std::bind(&AmsWebServer::firmwarePost, this), std::bind(&AmsWebServer::configFileUpload, this));
 	server.on(F("/configfile.cfg"), HTTP_GET, std::bind(&AmsWebServer::configFileDownload, this));
@@ -103,6 +124,8 @@ void AmsWebServer::setup(AmsConfiguration* config, GpioConfig* gpioConfig, Meter
 	server.on(F("/library/test/success.html"), HTTP_GET, std::bind(&AmsWebServer::redirectToMain, this)); // Apple connectivity check: http://www.apple.com/library/test/success.html
 	*/
 
+	server.on("/ssdp/schema.xml", HTTP_GET, std::bind(&AmsWebServer::ssdpSchema, this));
+
 	server.onNotFound(std::bind(&AmsWebServer::notFound, this));
 	
 	server.begin(); // Web server start
@@ -113,17 +136,15 @@ void AmsWebServer::setup(AmsConfiguration* config, GpioConfig* gpioConfig, Meter
 	mqttEnabled = strlen(mqttConfig.host) > 0;
 }
 
-
-void AmsWebServer::setMqtt(MQTTClient* mqtt) {
-	this->mqtt = mqtt;
-}
-
 void AmsWebServer::setTimezone(Timezone* tz) {
 	this->tz = tz;
 }
 
 void AmsWebServer::setMqttEnabled(bool enabled) {
 	mqttEnabled = enabled;
+}
+void AmsWebServer::setMqttHandler(AmsMqttHandler* mqttHandler) {
+	this->mqttHandler = mqttHandler;
 }
 
 void AmsWebServer::setEntsoeApi(EntsoeApi* eapi) {
@@ -147,20 +168,17 @@ void AmsWebServer::loop() {
 
 bool AmsWebServer::checkSecurity(byte level, bool send401) {
 	bool access = WiFi.getMode() == WIFI_AP || webConfig.security < level;
-	if(!access && webConfig.security >= level && server.hasHeader("Authorization")) {
+	if(!access && webConfig.security >= level && server.hasHeader(F("Authorization"))) {
 		String expectedAuth = String(webConfig.username) + ":" + String(webConfig.password);
 
-		String providedPwd = server.header("Authorization");
-		providedPwd.replace("Basic ", "");
+		String providedPwd = server.header(F("Authorization"));
+		providedPwd.replace(F("Basic "), F(""));
 
 		#if defined(ESP8266)
 		String expectedBase64 = base64::encode(expectedAuth, false);
 		#elif defined(ESP32)
 		String expectedBase64 = base64::encode(expectedAuth);
 		#endif
-
-		debugger->printf("Expected auth: %s\n", expectedBase64.c_str());
-		debugger->printf("Provided auth: %s\n", providedPwd.c_str());
 
 		access = providedPwd.equals(expectedBase64);
 	}
@@ -181,21 +199,21 @@ void AmsWebServer::notFound() {
 }
 
 void AmsWebServer::githubSvg() {
-	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf("Serving /github.svg over http...\n");
+	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Serving /github.svg over http...\n"));
 
-	server.sendHeader(HEADER_CACHE_CONTROL, CACHE_1HR);
+	server.sendHeader(HEADER_CACHE_CONTROL, CACHE_1MO);
 	server.send_P(200, "image/svg+xml", GITHUB_SVG);
 }
 
 void AmsWebServer::faviconSvg() {
-	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf("Serving /favicon.ico over http...\n");
+	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Serving /favicon.ico over http...\n"));
 
-	server.sendHeader(HEADER_CACHE_CONTROL, CACHE_1HR);
+	server.sendHeader(HEADER_CACHE_CONTROL, CACHE_1MO);
 	server.send_P(200, "image/svg+xml", FAVICON_SVG);
 }
 
 void AmsWebServer::sysinfoJson() {
-	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf("Serving /sysinfo.json over http...\n");
+	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Serving /sysinfo.json over http...\n"));
 
 	SystemConfig sys;
 	config->getSystemConfig(sys);
@@ -217,6 +235,9 @@ void AmsWebServer::sysinfoJson() {
 		hostname = "ams-"+chipIdStr;
 	}
 
+	IPAddress localIp = WiFi.localIP();
+	IPAddress subnet = WiFi.subnetMask();
+	IPAddress gateway = WiFi.gatewayIP();
 	IPAddress dns1 = WiFi.dnsIP(0);
 	IPAddress dns2 = WiFi.dnsIP(1);
 
@@ -229,9 +250,11 @@ void AmsWebServer::sysinfoJson() {
 	#if defined(ESP8266)
     wifi_get_macaddr(STATION_IF, mac);
     wifi_get_macaddr(SOFTAP_IF, apmac);
+	uint8_t cpu_freq = system_get_cpu_freq();
 	#elif defined(ESP32)
     esp_wifi_get_mac((wifi_interface_t)ESP_IF_WIFI_STA, mac);
     esp_wifi_get_mac((wifi_interface_t)ESP_IF_WIFI_AP, apmac);
+	uint32_t cpu_freq = esp_clk_cpu_freq() / 1000000;
 	#endif
 
     sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
@@ -240,16 +263,21 @@ void AmsWebServer::sysinfoJson() {
 	UiConfig ui;
 	config->getUiConfig(ui);
 
+	UpgradeInformation upinfo;
+	config->getUpgradeInformation(upinfo);
+
 	String meterModel = meterState->getMeterModel();
 	if(!meterModel.isEmpty())
-		meterModel.replace("\\", "\\\\");
+		meterModel.replace(F("\\"), F("\\\\"));
 
 	String meterId = meterState->getMeterId();
 	if(!meterId.isEmpty())
-		meterId.replace("\\", "\\\\");
+		meterId.replace(F("\\"), F("\\\\"));
+
+	time_t now = time(nullptr);
 
 	int size = snprintf_P(buf, BufferSize, SYSINFO_JSON,
-		VERSION,
+		FirmwareVersion::VersionString,
 		#if defined(CONFIG_IDF_TARGET_ESP32S2)
 		"esp32s2",
 		#elif defined(CONFIG_IDF_TARGET_ESP32C3)
@@ -262,6 +290,7 @@ void AmsWebServer::sysinfoJson() {
 		"esp8266",
 		#endif
 		chipIdStr.c_str(),
+		cpu_freq,
 		macStr,
 		apMacStr,
 		sys.boardType,
@@ -271,15 +300,18 @@ void AmsWebServer::sysinfoJson() {
 		hostname.c_str(),
 		performRestart ? "true" : "false",
 		rebootForUpgrade ? "true" : "false",
-		WiFi.localIP().toString().c_str(),
-		WiFi.subnetMask().toString().c_str(),
-		WiFi.gatewayIP().toString().c_str(),
 		#if defined(ESP8266)
+		localIp.isSet() ? localIp.toString().c_str() : "",
+		subnet.isSet() ? subnet.toString().c_str() : "",
+		gateway.isSet() ? gateway.toString().c_str() : "",
 		dns1.isSet() ? dns1.toString().c_str() : "",
 		dns2.isSet() ? dns2.toString().c_str() : "",
 		#else
-		dns1.toString().c_str(),
-		dns2.toString().c_str(),
+		localIp != INADDR_NONE ? localIp.toString().c_str() : "",
+		subnet != INADDR_NONE ? subnet.toString().c_str() : "",
+		gateway != INADDR_NONE ? gateway.toString().c_str() : "",
+		dns1 != INADDR_NONE ? dns1.toString().c_str() : "",
+		dns2 != INADDR_NONE ? dns2.toString().c_str() : "",
 		#endif
 		meterState->getMeterType(),
 		meterModel.c_str(),
@@ -295,7 +327,23 @@ void AmsWebServer::sysinfoJson() {
 		ui.showDayPlot,
 		ui.showMonthPlot,
 		ui.showTemperaturePlot,
-		webConfig.security
+		webConfig.security,
+		#if defined(ESP32)
+		rtc_get_reset_reason(0),
+		rdc->last_cause,
+		#else
+		ESP.getResetInfoPtr()->reason,
+		ESP.getResetInfoPtr()->exccause,
+		#endif
+		upinfo.exitCode,
+		upinfo.errorCode,
+		upinfo.fromVersion,
+		upinfo.toVersion,
+		ea->getUseLastMonth(),
+		ea->getCostLastMonth(),
+		ea->getProducedLastMonth(),
+		ea->getIncomeLastMonth(),
+		tz == NULL ? 0 : (tz->toLocal(now)-now)/3600
 	);
 
 	stripNonAscii((uint8_t*) buf, size+1);
@@ -307,26 +355,24 @@ void AmsWebServer::sysinfoJson() {
 	server.setContentLength(strlen(buf));
 	server.send(200, MIME_JSON, buf);
 
-	server.handleClient();
-	delay(250);
-
 	if(performRestart || rebootForUpgrade) {
+		server.handleClient();
+		delay(250);
+
 		if(ds != NULL) {
 			ds->save();
 		}
-		if(debugger->isActive(RemoteDebug::INFO)) debugger->printf(PSTR("Rebooting"));
+		if(debugger->isActive(RemoteDebug::INFO)) debugger->printf_P(PSTR("Rebooting\n"));
+		debugger->flush();
 		delay(1000);
-		#if defined(ESP8266)
-			ESP.reset();
-		#elif defined(ESP32)
-			ESP.restart();
-		#endif
+		rdc->cause = 1;
+		ESP.restart();
 		performRestart = false;
 	}
 }
 
 void AmsWebServer::dataJson() {
-	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf("Serving /data.json over http...\n");
+	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Serving /data.json over http...\n"));
 	uint64_t millis = millis64();
 
 	if(!checkSecurity(2, true))
@@ -339,9 +385,9 @@ void AmsWebServer::dataJson() {
 	#if defined(ESP8266)
 	if(vcc < 2.0) { // Voltage not correct, ESP would not run on this voltage
 		espStatus = 1;
-	} else if(vcc > 3.1 && vcc < 3.5) {
+	} else if(vcc > 2.8 && vcc < 3.5) {
 		espStatus = 1;
-	} else if(vcc > 3.0 && vcc < 3.6) {
+	} else if(vcc > 2.7 && vcc < 3.6) {
 		espStatus = 2;
 	} else {
 		espStatus = 3;
@@ -349,9 +395,9 @@ void AmsWebServer::dataJson() {
 	#elif defined(ESP32)
 	if(vcc < 2.0) { // Voltage not correct, ESP would not run on this voltage
 		espStatus = 1;
-	} else if(vcc > 2.8 && vcc < 3.5) {
+	} else if(vcc > 3.1 && vcc < 3.5) {
 		espStatus = 1;
-	} else if(vcc > 2.7 && vcc < 3.6) {
+	} else if(vcc > 3.0 && vcc < 3.6) {
 		espStatus = 2;
 	} else {
 		espStatus = 3;
@@ -383,17 +429,15 @@ void AmsWebServer::dataJson() {
 	uint8_t mqttStatus;
 	if(!mqttEnabled) {
 		mqttStatus = 0;
-	} else if(mqtt != NULL && mqtt->connected()) {
+	} else if(mqttHandler != NULL && mqttHandler->connected()) {
 		mqttStatus = 1;
-	} else if(mqtt != NULL && mqtt->lastError() == 0) {
+	} else if(mqttHandler == NULL || mqttHandler->lastError() == 0) {
 		mqttStatus = 2;
 	} else {
 		mqttStatus = 3;
 	}
 
-	float price = ENTSOE_NO_VALUE;
-	if(eapi != NULL)
-		price = eapi->getValueForHour(0);
+	float price = ea->getPriceForHour(0);
 
 	String peaks = "";
 	for(uint8_t i = 1; i <= ea->getConfig()->hours; i++) {
@@ -420,6 +464,7 @@ void AmsWebServer::dataJson() {
 		meterState->getL3Voltage(),
 		meterState->getL1Current(),
 		meterState->getL2Current(),
+		meterState->isL2currentMissing() ? "true" : "false",
 		meterState->getL3Current(),
 		meterState->getPowerFactor(),
 		meterState->getL1PowerFactor(),
@@ -434,7 +479,7 @@ void AmsWebServer::dataJson() {
 		hanStatus,
 		wifiStatus,
 		mqttStatus,
-		mqtt == NULL ? 0 : (int) mqtt->lastError(),
+		mqttHandler == NULL ? 0 : (int) mqttHandler->lastError(),
 		price == ENTSOE_NO_VALUE ? "null" : String(price, 2).c_str(),
 		meterState->getMeterType(),
 		meterConfig->distributionSystem,
@@ -453,7 +498,9 @@ void AmsWebServer::dataJson() {
 		ea->getCostThisMonth(),
 		ea->getProducedThisMonth(),
 		ea->getIncomeThisMonth(),
-		eapi == NULL ? "" : priceRegion.c_str(),
+		eapi == NULL ? "false" : "true",
+		priceRegion.c_str(),
+		priceCurrency.c_str(),
 		meterState->getLastError(),
 		eapi == NULL ? 0 : eapi->getLastError(),
 		(uint32_t) now,
@@ -469,7 +516,7 @@ void AmsWebServer::dataJson() {
 }
 
 void AmsWebServer::dayplotJson() {
-	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf("Serving /dayplot.json over http...\n");
+	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Serving /dayplot.json over http...\n"));
 
 	if(!checkSecurity(2))
 		return;
@@ -538,7 +585,7 @@ void AmsWebServer::dayplotJson() {
 }
 
 void AmsWebServer::monthplotJson() {
-	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf("Serving /monthplot.json over http...\n");
+	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Serving /monthplot.json over http...\n"));
 
 	if(!checkSecurity(2))
 		return;
@@ -621,7 +668,7 @@ void AmsWebServer::monthplotJson() {
 }
 
 void AmsWebServer::energyPriceJson() {
-	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf("Serving /energyprice.json over http...\n");
+	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Serving /energyprice.json over http...\n"));
 
 	if(!checkSecurity(2))
 		return;
@@ -633,6 +680,7 @@ void AmsWebServer::energyPriceJson() {
 
 	snprintf_P(buf, BufferSize, ENERGYPRICE_JSON, 
 		eapi == NULL ? "" : eapi->getCurrency(),
+		eapi == NULL ? "" : eapi->getSource(),
 		prices[0] == ENTSOE_NO_VALUE ? "null" : String(prices[0], 4).c_str(),
 		prices[1] == ENTSOE_NO_VALUE ? "null" : String(prices[1], 4).c_str(),
 		prices[2] == ENTSOE_NO_VALUE ? "null" : String(prices[2], 4).c_str(),
@@ -680,13 +728,13 @@ void AmsWebServer::energyPriceJson() {
 }
 
 void AmsWebServer::temperatureJson() {
-	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf("Serving /temperature.json over http...\n");
+	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Serving /temperature.json over http...\n"));
 
 	if(!checkSecurity(2))
 		return;
 
 	int count = hw->getTempSensorCount();
-	snprintf(buf, 16, "{\"c\":%d,\"s\":[", count);
+	snprintf_P(buf, 16, PSTR("{\"c\":%d,\"s\":["), count);
 
 	for(int i = 0; i < count; i++) {
 		TempSensorData* data = hw->getTempSensorData(i);
@@ -701,10 +749,10 @@ void AmsWebServer::temperatureJson() {
 			conf == NULL || conf->common ? 1 : 0,
 			data->lastRead
 		);
-		delay(10);
+		yield();
 	}
 	char* pos = buf+strlen(buf);
-	snprintf(count == 0 ? pos : pos-1, 8, "]}");
+	snprintf_P(count == 0 ? pos : pos-1, 8, PSTR("]}"));
 
 	server.sendHeader(HEADER_CACHE_CONTROL, CACHE_CONTROL_NO_CACHE);
 	server.sendHeader(HEADER_PRAGMA, PRAGMA_NO_CACHE);
@@ -715,7 +763,7 @@ void AmsWebServer::temperatureJson() {
 }
 
 void AmsWebServer::indexHtml() {
-	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf("Serving /index.html over http...\n");
+	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Serving /index.html over http...\n"));
 
 	server.sendHeader(HEADER_CACHE_CONTROL, CACHE_CONTROL_NO_CACHE);
 	server.sendHeader(HEADER_PRAGMA, PRAGMA_NO_CACHE);
@@ -728,33 +776,46 @@ void AmsWebServer::indexHtml() {
 }
 
 void AmsWebServer::indexCss() {
-	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf("Serving /index.css over http...\n");
+	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Serving /index.css over http...\n"));
 
 	if(!checkSecurity(2))
 		return;
 
-	server.sendHeader(HEADER_CACHE_CONTROL, CACHE_1MO);
-	server.setContentLength(INDEX_CSS_LEN);
-	server.send_P(200, MIME_CSS, INDEX_CSS);
+	server.sendHeader(HEADER_CACHE_CONTROL, CACHE_1YR);
+	server.sendHeader(HEADER_CONTENT_ENCODING, CONTENT_ENCODING_GZIP);
+	server.send_P(200, MIME_CSS, INDEX_CSS, INDEX_CSS_LEN);
 }
 
 void AmsWebServer::indexJs() {
-	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf("Serving /index.js over http...\n");
+	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Serving /index.js over http...\n"));
 
 	if(!checkSecurity(2))
 		return;
 
-	server.sendHeader(HEADER_CACHE_CONTROL, CACHE_1MO);
-	server.setContentLength(INDEX_JS_LEN);
-	server.send_P(200, MIME_JS, INDEX_JS);
+	server.sendHeader(HEADER_CACHE_CONTROL, CACHE_1YR);
+	server.sendHeader(HEADER_CONTENT_ENCODING, CONTENT_ENCODING_GZIP);
+	server.send_P(200, MIME_JS, INDEX_JS, INDEX_JS_LEN);
 }
 
 void AmsWebServer::configurationJson() {
-	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf("Serving /configuration.json over http...\n");
+	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Serving /configuration.json over http...\n"));
 
 	if(!checkSecurity(1))
 		return;
+	
+	bool multEnable = false;
+	if(meterConfig->wattageMultiplier != 1.0 && meterConfig->wattageMultiplier != 0.0)
+		multEnable = true;
+	if(meterConfig->voltageMultiplier != 1.0 && meterConfig->voltageMultiplier != 0.0)
+		multEnable = true;
+	if(meterConfig->amperageMultiplier != 1.0 && meterConfig->amperageMultiplier != 0.0)
+		multEnable = true;
+	if(meterConfig->accumulatedMultiplier != 1.0 && meterConfig->accumulatedMultiplier != 0.0)
+		multEnable = true;
+		
 
+	SystemConfig sysConfig;
+	config->getSystemConfig(sysConfig);
 	NtpConfig ntpConfig;
 	config->getNtpConfig(ntpConfig);
 	WiFiConfig wifiConfig;
@@ -779,6 +840,8 @@ void AmsWebServer::configurationJson() {
 	config->getDomoticzConfig(domo);
 	UiConfig ui;
 	config->getUiConfig(ui);
+	HomeAssistantConfig haconf;
+	config->getHomeAssistantConfig(haconf);
 
 	bool qsc = false;
 	bool qsr = false;
@@ -797,7 +860,7 @@ void AmsWebServer::configurationJson() {
 
 	server.setContentLength(CONTENT_LENGTH_UNKNOWN);
 	server.send_P(200, MIME_JSON, PSTR("{\"version\":\""));
-	server.sendContent_P(VERSION);
+	server.sendContent_P(FirmwareVersion::VersionString);
 	server.sendContent_P(PSTR("\","));
 	snprintf_P(buf, BufferSize, CONF_GENERAL_JSON,
 		ntpConfig.timezone,
@@ -811,17 +874,18 @@ void AmsWebServer::configurationJson() {
 		meterConfig->baud,
 		meterConfig->parity,
 		meterConfig->invert ? "true" : "false",
+		meterConfig->bufferSize * 64,
 		meterConfig->distributionSystem,
 		meterConfig->mainFuse,
 		meterConfig->productionCapacity,
 		encen ? "true" : "false",
 		toHex(meterConfig->encryptionKey, 16).c_str(),
 		toHex(meterConfig->authenticationKey, 16).c_str(),
-		meterConfig->wattageMultiplier > 1 || meterConfig->voltageMultiplier > 1 || meterConfig->amperageMultiplier > 1 || meterConfig->accumulatedMultiplier > 1 ? "true" : "false",
-		meterConfig->wattageMultiplier / 1000.0,
-		meterConfig->voltageMultiplier / 1000.0,
-		meterConfig->amperageMultiplier / 1000.0,
-		meterConfig->accumulatedMultiplier / 1000.0
+		multEnable ? "true" : "false",
+		meterConfig->wattageMultiplier == 0.0 ? 1.0 : meterConfig->wattageMultiplier / 1000.0,
+		meterConfig->voltageMultiplier == 0.0 ? 1.0 : meterConfig->voltageMultiplier / 1000.0,
+		meterConfig->amperageMultiplier == 0.0 ? 1.0 : meterConfig->amperageMultiplier / 1000.0,
+		meterConfig->accumulatedMultiplier == 0.0 ? 1.0 : meterConfig->accumulatedMultiplier / 1000.0
 	);
 	server.sendContent(buf);
 
@@ -844,7 +908,8 @@ void AmsWebServer::configurationJson() {
 		strlen(wifiConfig.psk) > 0 ? "***" : "",
 		wifiConfig.power / 10.0,
 		wifiConfig.sleep,
-		wifiConfig.autoreboot ? "true" : "false"
+		"false",
+		wifiConfig.use11b ? "true" : "false"
 	);
 	server.sendContent(buf);
 	snprintf_P(buf, BufferSize, CONF_NET_JSON,
@@ -878,7 +943,8 @@ void AmsWebServer::configurationJson() {
 		entsoe.token,
 		entsoe.area,
 		entsoe.currency,
-		entsoe.multiplier / 1000.0
+		entsoe.multiplier / 1000.0,
+		entsoe.fixedPrice == 0 ? "null" : String(entsoe.fixedPrice / 1000.0, 10).c_str()
 	);
 	server.sendContent(buf);
 	snprintf_P(buf, BufferSize, CONF_DEBUG_JSON,
@@ -889,6 +955,7 @@ void AmsWebServer::configurationJson() {
 	server.sendContent(buf);
 	snprintf_P(buf, BufferSize, CONF_GPIO_JSON,
 		gpioConfig->hanPin == 0xff ? "null" : String(gpioConfig->hanPin, 10).c_str(),
+		gpioConfig->hanPinPullup ? "true" : "false",
 		gpioConfig->apPin == 0xff ? "null" : String(gpioConfig->apPin, 10).c_str(),
 		gpioConfig->ledPin == 0xff ? "null" : String(gpioConfig->ledPin, 10).c_str(),
 		gpioConfig->ledInverted ? "true" : "false",
@@ -928,11 +995,25 @@ void AmsWebServer::configurationJson() {
 		domo.vl3idx
 	);
 	server.sendContent(buf);
-	server.sendContent("}");
+	snprintf_P(buf, BufferSize, CONF_HA_JSON,
+		haconf.discoveryPrefix,
+		haconf.discoveryHostname,
+		haconf.discoveryNameTag
+	);
+	server.sendContent(buf);
+	snprintf_P(buf, BufferSize, CONF_CLOUD_JSON,
+		#if defined(ESP32) && defined(ENERGY_SPEEDOMETER_PASS)
+		sysConfig.energyspeedometer == 7 ? "true" : "false"
+		#else
+		"null"
+		#endif
+	);
+	server.sendContent(buf);
+	server.sendContent_P(PSTR("}"));
 }
 
 void AmsWebServer::handleSave() {
-	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf(PSTR("Handling save method from http"));
+	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Handling save method from http\n"));
 	if(!checkSecurity(1))
 		return;
 
@@ -963,6 +1044,13 @@ void AmsWebServer::handleSave() {
 					gpioConfig->ledPin = 15;
 					gpioConfig->ledInverted = false;
 					gpioConfig->apPin = 0;
+					gpioConfig->hanPin = hanPin > 0 ? hanPin : 18;
+					if(gpioConfig->hanPin != 18) {
+						gpioConfig->vccPin = 18;
+						gpioConfig->vccResistorGnd = 45;
+						gpioConfig->vccResistorVcc = 10;
+					}
+					break;
 				case 50: // Generic ESP32-S2
 					gpioConfig->hanPin = hanPin > 0 ? hanPin : 18;
 					break;
@@ -970,6 +1058,24 @@ void AmsWebServer::handleSave() {
 					success = false;
 			}
 		#elif defined(CONFIG_IDF_TARGET_ESP32C3)
+			switch(boardType) {
+				case 8: // dbeinder: HAN mosquito
+					gpioConfig->hanPin = 7;
+					gpioConfig->hanPinPullup = false;
+					gpioConfig->apPin = 9;
+					gpioConfig->ledRgbInverted = true;
+					gpioConfig->ledPinRed = 5;
+					gpioConfig->ledPinGreen = 6;
+					gpioConfig->ledPinBlue = 4;
+					break;
+				case 71: // ESP32-C3-DevKitM-1
+					gpioConfig->apPin = 9;
+				case 70: // Generic ESP32-C3
+					gpioConfig->hanPin = hanPin > 0 ? hanPin : 7;
+					break;
+				default:
+					success = false;
+			}
 		#elif defined(ESP32)
 			switch(boardType) {
 				case 201: // D32
@@ -1072,7 +1178,6 @@ void AmsWebServer::handleSave() {
 		if(!psk.equals("***")) {
 			strcpy(wifi.psk, psk.c_str());
 		}
-		wifi.mode = 1; // WIFI_STA
 
 		if(server.hasArg(F("sm")) && server.arg(F("sm")) == "static") {
 			strcpy(wifi.ip, server.arg(F("si")).c_str());
@@ -1095,16 +1200,22 @@ void AmsWebServer::handleSave() {
 				break;
 			case 3: // Pow-K UART0
 			case 5: // Pow-K+
+				meterConfig->baud = 2400;
 				meterConfig->parity = 3; // 8N1
 			case 2: // spenceme
 			case 50: // Generic ESP32-S2
 			case 51: // Wemos S2 mini
-				meterConfig->baud = 2400;
+			case 70: // Generic ESP32-C3
+			case 71: // ESP32-C3-DevKitM-1
 				wifi.sleep = 1; // Modem sleep
 				break;
 			case 4: // Pow-U UART0
 			case 7: // Pow-U+
 				wifi.sleep = 2; // Light sleep
+				break;
+			case 8: // dbeinder: HAN mosquito
+				wifi.sleep = 1; // Modem sleep
+				wifi.use11b = 0;
 				break;
 		}
 		config->setWiFiConfig(wifi);
@@ -1123,7 +1234,7 @@ void AmsWebServer::handleSave() {
 	}
 
 	if(server.hasArg(F("m")) && server.arg(F("m")) == F("true")) {
-		if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf(PSTR("Received meter config"));
+		if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Received meter config\n"));
 		config->getMeterConfig(*meterConfig);
 		meterConfig->baud = server.arg(F("mb")).toInt();
 		meterConfig->parity = server.arg(F("mp")).toInt();
@@ -1131,29 +1242,39 @@ void AmsWebServer::handleSave() {
 		meterConfig->distributionSystem = server.arg(F("md")).toInt();
 		meterConfig->mainFuse = server.arg(F("mf")).toInt();
 		meterConfig->productionCapacity = server.arg(F("mr")).toInt();
+		meterConfig->bufferSize = min((double) 64, ceil((server.arg(F("ms")).toInt()) / 64));
 		maxPwr = 0;
 
-		String encryptionKeyHex = server.arg(F("mek"));
-		if(!encryptionKeyHex.isEmpty()) {
-			encryptionKeyHex.replace(F("0x"), F(""));
-			fromHex(meterConfig->encryptionKey, encryptionKeyHex, 16);
+		if(server.hasArg(F("me")) && server.arg(F("me")) == F("true")) {
+			String encryptionKeyHex = server.arg(F("mek"));
+			if(!encryptionKeyHex.isEmpty()) {
+				encryptionKeyHex.replace(F("0x"), F(""));
+				fromHex(meterConfig->encryptionKey, encryptionKeyHex, 16);
+			} else {
+				memset(meterConfig->encryptionKey, 0, 16);
+			}
+
+			String authenticationKeyHex = server.arg(F("mea"));
+			if(!authenticationKeyHex.isEmpty()) {
+				authenticationKeyHex.replace(F("0x"), F(""));
+				fromHex(meterConfig->authenticationKey, authenticationKeyHex, 16);
+			} else {
+				memset(meterConfig->authenticationKey, 0, 16);
+			}
+		} else {
+			memset(meterConfig->encryptionKey, 0, 16);
+			memset(meterConfig->authenticationKey, 0, 16);
 		}
 
-		String authenticationKeyHex = server.arg(F("mea"));
-		if(!authenticationKeyHex.isEmpty()) {
-			authenticationKeyHex.replace(F("0x"), F(""));
-			fromHex(meterConfig->authenticationKey, authenticationKeyHex, 16);
-		}
-
-		meterConfig->wattageMultiplier = server.arg(F("mmw")).toDouble() * 1000;
-		meterConfig->voltageMultiplier = server.arg(F("mmv")).toDouble() * 1000;
-		meterConfig->amperageMultiplier = server.arg(F("mma")).toDouble() * 1000;
-		meterConfig->accumulatedMultiplier = server.arg(F("mmc")).toDouble() * 1000;
+		meterConfig->wattageMultiplier = server.arg(F("mmw")).toFloat() * 1000;
+		meterConfig->voltageMultiplier = server.arg(F("mmv")).toFloat() * 1000;
+		meterConfig->amperageMultiplier = server.arg(F("mma")).toFloat() * 1000;
+		meterConfig->accumulatedMultiplier = server.arg(F("mmc")).toFloat() * 1000;
 		config->setMeterConfig(*meterConfig);
 	}
 
 	if(server.hasArg(F("w")) && server.arg(F("w")) == F("true")) {
-		if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf(PSTR("Received WiFi config"));
+		if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Received WiFi config\n"));
 		WiFiConfig wifi;
 		config->getWiFiConfig(wifi);
 		strcpy(wifi.ssid, server.arg(F("ws")).c_str());
@@ -1163,15 +1284,23 @@ void AmsWebServer::handleSave() {
 		}
 		wifi.power = server.arg(F("ww")).toFloat() * 10;
 		wifi.sleep = server.arg(F("wz")).toInt();
-		wifi.autoreboot = server.hasArg(F("wa")) && server.arg(F("wa")) == F("true");
+		wifi.use11b = server.hasArg(F("wb")) && server.arg(F("wb")) == F("true");
 		config->setWiFiConfig(wifi);
 
-		if(server.hasArg(F("nm")) && server.arg(F("nm")) == "static") {
-			strcpy(wifi.ip, server.arg(F("ni")).c_str());
-			strcpy(wifi.gateway, server.arg(F("ng")).c_str());
-			strcpy(wifi.subnet, server.arg(F("ns")).c_str());
-			strcpy(wifi.dns1, server.arg(F("nd1")).c_str());
-			strcpy(wifi.dns2, server.arg(F("nd2")).c_str());
+		if(server.hasArg(F("nm"))) {
+			if(server.arg(F("nm")) == "static") {
+				strcpy(wifi.ip, server.arg(F("ni")).c_str());
+				strcpy(wifi.gateway, server.arg(F("ng")).c_str());
+				strcpy(wifi.subnet, server.arg(F("ns")).c_str());
+				strcpy(wifi.dns1, server.arg(F("nd1")).c_str());
+				strcpy(wifi.dns2, server.arg(F("nd2")).c_str());
+			} else if(server.arg(F("nm")) == "dhcp") {
+				strcpy(wifi.ip, "");
+				strcpy(wifi.gateway, "");
+				strcpy(wifi.subnet, "");
+				strcpy(wifi.dns1, "");
+				strcpy(wifi.dns2, "");
+			}
 		}
 		wifi.mdns = server.hasArg(F("nd")) && server.arg(F("nd")) == F("true");
 		config->setWiFiConfig(wifi);
@@ -1187,7 +1316,7 @@ void AmsWebServer::handleSave() {
 	}
 
 	if(server.hasArg(F("q")) && server.arg(F("q")) == F("true")) {
-		if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf(PSTR("Received MQTT config"));
+		if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Received MQTT config\n"));
 		MqttConfig mqtt;
 		config->getMqttConfig(mqtt);
 		if(server.hasArg(F("qh")) && !server.arg(F("qh")).isEmpty()) {
@@ -1218,7 +1347,7 @@ void AmsWebServer::handleSave() {
 	}
 
 	if(server.hasArg(F("o")) && server.arg(F("o")) == F("true")) {
-		if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf(PSTR("Received Domoticz config"));
+		if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Received Domoticz config\n"));
 		DomoticzConfig domo {
 			static_cast<uint16_t>(server.arg(F("oe")).toInt()),
 			static_cast<uint16_t>(server.arg(F("ou1")).toInt()),
@@ -1229,9 +1358,18 @@ void AmsWebServer::handleSave() {
 		config->setDomoticzConfig(domo);
 	}
 
+	if(server.hasArg(F("h")) && server.arg(F("h")) == F("true")) {
+		if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Received Home-Assistant config\n"));
+		HomeAssistantConfig haconf;
+		config->getHomeAssistantConfig(haconf);
+		strcpy(haconf.discoveryPrefix, server.arg(F("ht")).c_str());
+		strcpy(haconf.discoveryHostname, server.arg(F("hh")).c_str());
+		strcpy(haconf.discoveryNameTag, server.arg(F("hn")).c_str());
+		config->setHomeAssistantConfig(haconf);
+	}
 
 	if(server.hasArg(F("g")) && server.arg(F("g")) == F("true")) {
-		if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf(PSTR("Received web config"));
+		if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Received web config\n"));
 		webConfig.security = server.arg(F("gs")).toInt();
 		if(webConfig.security > 0) {
 			strcpy(webConfig.username, server.arg(F("gu")).c_str());
@@ -1261,8 +1399,9 @@ void AmsWebServer::handleSave() {
 	}
 
 	if(server.hasArg(F("i")) && server.arg(F("i")) == F("true")) {
-		if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf(PSTR("Received GPIO config"));
-		gpioConfig->hanPin = server.hasArg(F("ih")) && !server.arg(F("ih")).isEmpty() ? server.arg(F("ih")).toInt() : 3;
+		if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Received GPIO config\n"));
+		gpioConfig->hanPin = server.hasArg(F("ihp")) && !server.arg(F("ihp")).isEmpty() ? server.arg(F("ihp")).toInt() : 3;
+		gpioConfig->hanPinPullup = server.hasArg(F("ihu")) && server.arg(F("ihu")) == F("true");
 		gpioConfig->ledPin = server.hasArg(F("ilp")) && !server.arg(F("ilp")).isEmpty() ? server.arg(F("ilp")).toInt() : 0xFF;
 		gpioConfig->ledInverted = server.hasArg(F("ili")) && server.arg(F("ili")) == F("true");
 		gpioConfig->ledPinRed = server.hasArg(F("irr")) && !server.arg(F("irr")).isEmpty() ? server.arg(F("irr")).toInt() : 0xFF;
@@ -1279,7 +1418,7 @@ void AmsWebServer::handleSave() {
 	}
 
 	if(server.hasArg(F("iv")) && server.arg(F("iv")) == F("true")) {
-		if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf(PSTR("Received Vcc config"));
+		if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Received Vcc config\n"));
 		gpioConfig->vccOffset = server.hasArg(F("ivo")) && !server.arg(F("ivo")).isEmpty() ? server.arg(F("ivo")).toFloat() * 100 : 0;
 		gpioConfig->vccMultiplier = server.hasArg(F("ivm")) && !server.arg(F("ivm")).isEmpty() ? server.arg(F("ivm")).toFloat() * 1000 : 1000;
 		gpioConfig->vccBootLimit = server.hasArg(F("ivb")) && !server.arg(F("ivb")).isEmpty() ? server.arg(F("ivb")).toFloat() * 10 : 0;
@@ -1287,7 +1426,7 @@ void AmsWebServer::handleSave() {
 	}
 
 	if(server.hasArg(F("d")) && server.arg(F("d")) == F("true")) {
-		if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf(PSTR("Received Debug config"));
+		if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Received Debug config\n"));
 		DebugConfig debug;
 		config->getDebugConfig(debug);
 		bool active = debug.serial || debug.telnet;
@@ -1334,7 +1473,7 @@ void AmsWebServer::handleSave() {
 	}
 
 	if(server.hasArg(F("p")) && server.arg(F("p")) == F("true")) {
-		if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf(PSTR("Received price API config"));
+		if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Received price API config\n"));
 
 		priceRegion = server.arg(F("pr"));
 
@@ -1344,11 +1483,12 @@ void AmsWebServer::handleSave() {
 		strcpy(entsoe.area, priceRegion.c_str());
 		strcpy(entsoe.currency, server.arg(F("pc")).c_str());
 		entsoe.multiplier = server.arg(F("pm")).toFloat() * 1000;
+		entsoe.fixedPrice = server.hasArg(F("pf")) ? server.arg(F("pf")).toFloat() * 1000 : 0;
 		config->setEntsoeConfig(entsoe);
 	}
 
 	if(server.hasArg(F("t")) && server.arg(F("t")) == F("true")) {
-		if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf(PSTR("Received energy accounting config"));
+		if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Received energy accounting config\n"));
 		EnergyAccountingConfig eac;
 		eac.thresholds[0] = server.arg(F("t0")).toInt();
 		eac.thresholds[1] = server.arg(F("t1")).toInt();
@@ -1363,10 +1503,18 @@ void AmsWebServer::handleSave() {
 		config->setEnergyAccountingConfig(eac);
 	}
 
-	if(debugger->isActive(RemoteDebug::INFO)) debugger->printf(PSTR("Saving configuration now..."));
+	if(server.hasArg(F("c")) && server.arg(F("c")) == F("true")) {
+		if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Received cloud config\n"));
+		SystemConfig sys;
+		config->getSystemConfig(sys);
+		sys.energyspeedometer = server.hasArg(F("ces")) && server.arg(F("ces")) == F("true") ? 7 : 0;
+		config->setSystemConfig(sys);
+	}
+
+	if(debugger->isActive(RemoteDebug::INFO)) debugger->printf_P(PSTR("Saving configuration now...\n"));
 
 	if (config->save()) {
-		if(debugger->isActive(RemoteDebug::INFO)) debugger->printf(PSTR("Successfully saved."));
+		if(debugger->isActive(RemoteDebug::INFO)) debugger->printf_P(PSTR("Successfully saved.\n"));
 		if(config->isWifiChanged() || performRestart) {
 			performRestart = true;
 		} else {
@@ -1384,26 +1532,24 @@ void AmsWebServer::handleSave() {
 	server.setContentLength(strlen(buf));
 	server.send(200, MIME_JSON, buf);
 
-	server.handleClient();
-	delay(250);
-
 	if(performRestart || rebootForUpgrade) {
+		server.handleClient();
+		delay(250);
+
 		if(ds != NULL) {
 			ds->save();
 		}
-		if(debugger->isActive(RemoteDebug::INFO)) debugger->printf(PSTR("Rebooting"));
+		if(debugger->isActive(RemoteDebug::INFO)) debugger->printf_P(PSTR("Rebooting\n"));
+		debugger->flush();
 		delay(1000);
-		#if defined(ESP8266)
-			ESP.reset();
-		#elif defined(ESP32)
-			ESP.restart();
-		#endif
+		rdc->cause = 2;
 		performRestart = false;
+		ESP.restart();
 	}
 }
 
 void AmsWebServer::reboot() {
-	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf("Serving /reboot over http...\n");
+	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Serving /reboot over http...\n"));
 
 	if(!checkSecurity(1))
 		return;
@@ -1413,18 +1559,17 @@ void AmsWebServer::reboot() {
 	server.handleClient();
 	delay(250);
 
-	if(debugger->isActive(RemoteDebug::INFO)) debugger->printf(PSTR("Rebooting"));
-	delay(1000);
-	#if defined(ESP8266)
-		ESP.reset();
-	#elif defined(ESP32)
-		ESP.restart();
-	#endif
+	if(debugger->isActive(RemoteDebug::INFO)) debugger->printf_P(PSTR("Rebooting\n"));
+	debugger->flush();
+	delay(1000);	rdc->cause = 3;
+
+	rdc->cause = 3;
 	performRestart = false;
+	ESP.restart();
 }
 
 void AmsWebServer::upgrade() {
-	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf("Serving /upgrade over http...\n");
+	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Serving /upgrade over http...\n"));
 
 	if(!checkSecurity(1))
 		return;
@@ -1453,44 +1598,60 @@ void AmsWebServer::upgrade() {
 		if(server.hasArg(F("version"))) {
 			url += "/" + server.arg(F("version"));
 		}
-
-		WiFiClient client;
-		#if defined(ESP8266)
-			String chipType = F("esp8266");
-		#elif defined(CONFIG_IDF_TARGET_ESP32S2)
-			String chipType = F("esp32s2");
-		#elif defined(ESP32)
-			#if defined(CONFIG_FREERTOS_UNICORE)
-				String chipType = F("esp32solo");
-			#else
-				String chipType = F("esp32");
-			#endif
-		#endif
-
-		#if defined(ESP8266)
-			ESPhttpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-			t_httpUpdate_return ret = ESPhttpUpdate.update(client, url, VERSION);
-		#elif defined(ESP32)
-			HTTPUpdate httpUpdate;
-			httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-			HTTPUpdateResult ret = httpUpdate.update(client, url, String(VERSION) + "-" + chipType);
-		#endif
-
-		switch(ret) {
-			case HTTP_UPDATE_FAILED:
-				debugger->printf(PSTR("Update failed"));
-				break;
-			case HTTP_UPDATE_NO_UPDATES:
-				debugger->printf(PSTR("No Update"));
-				break;
-			case HTTP_UPDATE_OK:
-				debugger->printf(PSTR("Update OK"));
-				break;
-		}
+		upgradeFromUrl(url, server.arg(F("expected_version")));
 	}
 }
+
+void AmsWebServer::upgradeFromUrl(String url, String nextVersion) {
+	config->setUpgradeInformation(0xFF, 0xFF, FirmwareVersion::VersionString, nextVersion.c_str());
+
+	WiFiClient client;
+	#if defined(ESP8266)
+		String chipType = F("esp8266");
+	#elif defined(CONFIG_IDF_TARGET_ESP32S2)
+		String chipType = F("esp32s2");
+	#elif defined(CONFIG_IDF_TARGET_ESP32C3)
+		String chipType = F("esp32c3");
+	#elif defined(ESP32)
+		#if defined(CONFIG_FREERTOS_UNICORE)
+			String chipType = F("esp32solo");
+		#else
+			String chipType = F("esp32");
+		#endif
+	#endif
+
+	#if defined(ESP8266)
+		ESP8266HTTPUpdate httpUpdate = ESP8266HTTPUpdate(60000);
+		String currentVersion = FirmwareVersion::VersionString;
+	#elif defined(ESP32)
+		HTTPUpdate httpUpdate = HTTPUpdate(60000);
+		String currentVersion = String(FirmwareVersion::VersionString) + "-" + chipType;
+	#endif
+
+	httpUpdate.rebootOnUpdate(false);
+	httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+	HTTPUpdateResult ret = httpUpdate.update(client, url, currentVersion);
+	int lastError = httpUpdate.getLastError();
+
+	config->setUpgradeInformation(ret, ret == HTTP_UPDATE_OK ? 0 : lastError, FirmwareVersion::VersionString, nextVersion.c_str());
+	switch(ret) {
+		case HTTP_UPDATE_FAILED:
+			debugger->printf_P(PSTR("Update failed\n"));
+			break;
+		case HTTP_UPDATE_NO_UPDATES:
+			debugger->printf_P(PSTR("No Update\n"));
+			break;
+		case HTTP_UPDATE_OK:
+			debugger->printf_P(PSTR("Update OK\n"));
+			debugger->flush();
+			rdc->cause = 4;
+			ESP.restart();
+			break;
+	}
+}
+
 void AmsWebServer::firmwareHtml() {
-	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf(PSTR("Serving /firmware.html over http..."));
+	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Serving /firmware.html over http...\n"));
 
 	if(!checkSecurity(1))
 		return;
@@ -1504,51 +1665,20 @@ void AmsWebServer::firmwareHtml() {
 }
 
 void AmsWebServer::firmwarePost() {
-	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf(PSTR("Handling firmware post..."));
+	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Handling firmware post...\n"));
 	if(!checkSecurity(1))
 		return;
 	
 	if(rebootForUpgrade) {
 		server.send(200);
 	} else {
+		config->setUpgradeInformation(0xFF, 0xFF, FirmwareVersion::VersionString, "");
 		if(server.hasArg(F("url"))) {
 			String url = server.arg(F("url"));
 			if(!url.isEmpty() && (url.startsWith(F("http://")) || url.startsWith(F("https://")))) {
-				if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf(PSTR("Custom firmware URL was provided"));
+				if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Custom firmware URL was provided\n"));
 
-				WiFiClient client;
-				#if defined(ESP8266)
-					String chipType = F("esp8266");
-				#elif defined(CONFIG_IDF_TARGET_ESP32S2)
-					String chipType = F("esp32s2");
-				#elif defined(ESP32)
-					#if defined(CONFIG_FREERTOS_UNICORE)
-						String chipType = F("esp32solo");
-					#else
-						String chipType = F("esp32");
-					#endif
-				#endif
-
-				#if defined(ESP8266)
-					ESPhttpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-					t_httpUpdate_return ret = ESPhttpUpdate.update(client, url, VERSION);
-				#elif defined(ESP32)
-					HTTPUpdate httpUpdate;
-					httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-					HTTPUpdateResult ret = httpUpdate.update(client, url, String(VERSION) + "-" + chipType);
-				#endif
-
-				switch(ret) {
-					case HTTP_UPDATE_FAILED:
-						debugger->printf(PSTR("Update failed"));
-						break;
-					case HTTP_UPDATE_NO_UPDATES:
-						debugger->printf(PSTR("No Update"));
-						break;
-					case HTTP_UPDATE_OK:
-						debugger->printf(PSTR("Update OK"));
-						break;
-				}			
+				upgradeFromUrl(url, "");
 				server.send(200, MIME_PLAIN, "OK");
 				return;
 			}
@@ -1567,11 +1697,11 @@ void AmsWebServer::firmwareUpload() {
 	if(upload.status == UPLOAD_FILE_START) {
         String filename = upload.filename;
 		if(filename.isEmpty()) {
-			if(debugger->isActive(RemoteDebug::ERROR)) debugger->printf(PSTR("No file, falling back to post\n"));
+			if(debugger->isActive(RemoteDebug::ERROR)) debugger->printf_P(PSTR("No file, falling back to post\n"));
 			return;
 		}
-        if(!filename.endsWith(".bin")) {
-            server.send(500, MIME_PLAIN, "500: couldn't create file");
+        if(!filename.endsWith(F(".bin"))) {
+            server.send_P(500, MIME_PLAIN, PSTR("500: couldn't create file"));
 		} else {
 			#if defined(ESP32)
 				esp_task_wdt_delete(NULL);
@@ -1584,7 +1714,7 @@ void AmsWebServer::firmwareUpload() {
 	uploadFile(FILE_FIRMWARE);
 	if(upload.status == UPLOAD_FILE_END) {
 		rebootForUpgrade = true;
-		server.sendHeader("Location","/");
+		server.sendHeader(HEADER_LOCATION,F("/"));
 		server.send(302);
 	}
 }
@@ -1593,10 +1723,10 @@ HTTPUpload& AmsWebServer::uploadFile(const char* path) {
     HTTPUpload& upload = server.upload();
     if(upload.status == UPLOAD_FILE_START){
 		if(uploading) {
-			if(debugger->isActive(RemoteDebug::ERROR)) debugger->printf(PSTR("Upload already in progress\n"));
+			if(debugger->isActive(RemoteDebug::ERROR)) debugger->printf_P(PSTR("Upload already in progress\n"));
 			server.send_P(500, MIME_HTML, PSTR("<html><body><h1>Upload already in progress!</h1></body></html>"));
 		} else if (!LittleFS.begin()) {
-			if(debugger->isActive(RemoteDebug::ERROR)) debugger->printf(PSTR("An Error has occurred while mounting LittleFS\n"));
+			if(debugger->isActive(RemoteDebug::ERROR)) debugger->printf_P(PSTR("An Error has occurred while mounting LittleFS\n"));
 			server.send_P(500, MIME_HTML, PSTR("<html><body><h1>Unable to mount LittleFS!</h1></body></html>"));
 		} else {
 			uploading = true;
@@ -1631,7 +1761,7 @@ HTTPUpload& AmsWebServer::uploadFile(const char* path) {
 				LittleFS.remove(path);
 				LittleFS.end();
 
-				if(debugger->isActive(RemoteDebug::ERROR)) debugger->printf(PSTR("An Error has occurred while writing file"));
+				if(debugger->isActive(RemoteDebug::ERROR)) debugger->printf_P(PSTR("An Error has occurred while writing file\n"));
 				snprintf_P(buf, BufferSize, RESPONSE_JSON,
 					"false",
 					"File size does not match",
@@ -1648,7 +1778,7 @@ HTTPUpload& AmsWebServer::uploadFile(const char* path) {
         if(file) {
 			file.flush();
             file.close();
-//			LittleFS.end();
+			LittleFS.end();
         } else {
 			debugger->printf_P(PSTR("File was not valid in the end... Write error: %d, \n"), file.getWriteError());
 			snprintf_P(buf, BufferSize, RESPONSE_JSON,
@@ -1672,13 +1802,13 @@ void AmsWebServer::factoryResetPost() {
 	if(!checkSecurity(1))
 		return;
 
-	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf(PSTR("Performing factory reset"));
+	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Performing factory reset\n"));
 
 	bool success = false;
 	if(server.hasArg(F("perform")) && server.arg(F("perform")) == F("true")) {
-		if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf(PSTR("Formatting LittleFS"));
+		if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Formatting LittleFS\n"));
 		LittleFS.format();
-		if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf(PSTR("Clearing configuration"));
+		if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Clearing configuration\n"));
 		config->clear();
 
 		success = true;
@@ -1695,13 +1825,11 @@ void AmsWebServer::factoryResetPost() {
 	server.handleClient();
 	delay(250);
 
-	if(debugger->isActive(RemoteDebug::INFO)) debugger->printf(PSTR("Rebooting"));
+	if(debugger->isActive(RemoteDebug::INFO)) debugger->printf_P(PSTR("Rebooting\n"));
+	debugger->flush();
 	delay(1000);
-	#if defined(ESP8266)
-		ESP.reset();
-	#elif defined(ESP32)
-		ESP.restart();
-	#endif
+	rdc->cause = 5;
+	ESP.restart();
 }
 
 void AmsWebServer::robotstxt() {
@@ -1725,6 +1853,23 @@ void AmsWebServer::mqttCaUpload() {
 	}
 }
 
+void AmsWebServer::mqttCaDelete() {
+	if(!checkSecurity(1))
+		return;
+
+	if(!uploading) { // Not an upload
+		deleteFile(FILE_MQTT_CA);
+		server.send(200);
+		MqttConfig mqttConfig;
+		if(config->getMqttConfig(mqttConfig) && mqttConfig.ssl) {
+			config->setMqttChanged();
+		}
+	} else {
+		uploading = false;
+		server.send(200);
+	}
+}
+
 void AmsWebServer::mqttCertUpload() {
 	if(!checkSecurity(1))
 		return;
@@ -1738,6 +1883,23 @@ void AmsWebServer::mqttCertUpload() {
 		if(config->getMqttConfig(mqttConfig) && mqttConfig.ssl) {
 			config->setMqttChanged();
 		}
+	}
+}
+
+void AmsWebServer::mqttCertDelete() {
+	if(!checkSecurity(1))
+		return;
+
+	if(!uploading) { // Not an upload
+		deleteFile(FILE_MQTT_CERT);
+		server.send(200);
+		MqttConfig mqttConfig;
+		if(config->getMqttConfig(mqttConfig) && mqttConfig.ssl) {
+			config->setMqttChanged();
+		}
+	} else {
+		uploading = false;
+		server.send(200);
 	}
 }
 
@@ -1757,8 +1919,32 @@ void AmsWebServer::mqttKeyUpload() {
 	}
 }
 
+void AmsWebServer::mqttKeyDelete() {
+	if(!checkSecurity(1))
+		return;
+
+	if(!uploading) { // Not an upload
+		deleteFile(FILE_MQTT_KEY);
+		server.send(200);
+		MqttConfig mqttConfig;
+		if(config->getMqttConfig(mqttConfig) && mqttConfig.ssl) {
+			config->setMqttChanged();
+		}
+	} else {
+		uploading = false;
+		server.send(200);
+	}
+}
+
+void AmsWebServer::deleteFile(const char* path) {
+	if(LittleFS.begin()) {
+		LittleFS.remove(path);
+		LittleFS.end();
+	}
+}
+
 void AmsWebServer::tariffJson() {
-	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf("Serving /tariff.json over http...\n");
+	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Serving /tariff.json over http...\n"));
 
 	if(!checkSecurity(2))
 		return;
@@ -1801,12 +1987,13 @@ void AmsWebServer::tariffJson() {
 	server.send(200, MIME_JSON, buf);
 }
 
-void AmsWebServer::setPriceRegion(String priceRegion) {
-	this->priceRegion = priceRegion;
+void AmsWebServer::setPriceSettings(String region, String currency) {
+	this->priceRegion = region;
+	this->priceCurrency = currency;
 }
 
 void AmsWebServer::configFileDownload() {
-	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf("Serving /configfile.cfg over http...\n");
+	if(debugger->isActive(RemoteDebug::DEBUG)) debugger->printf_P(PSTR("Serving /configfile.cfg over http...\n"));
 
 	if(!checkSecurity(1))
 		return;
@@ -1817,7 +2004,6 @@ void AmsWebServer::configFileDownload() {
 	bool includeWeb = server.hasArg(F("ie")) && server.arg(F("ie")) == F("true");
 	bool includeMeter = server.hasArg(F("it")) && server.arg(F("it")) == F("true");
 	bool includeGpio = server.hasArg(F("ig")) && server.arg(F("ig")) == F("true");
-	bool includeDomo = server.hasArg(F("id")) && server.arg(F("id")) == F("true");
 	bool includeNtp = server.hasArg(F("in")) && server.arg(F("in")) == F("true");
 	bool includeEntsoe = server.hasArg(F("is")) && server.arg(F("is")) == F("true");
 	bool includeThresholds = server.hasArg(F("ih")) && server.arg(F("ih")) == F("true");
@@ -1832,7 +2018,7 @@ void AmsWebServer::configFileDownload() {
 	server.setContentLength(CONTENT_LENGTH_UNKNOWN);
 
 	server.send_P(200, MIME_PLAIN, PSTR("amsconfig\n"));
-	server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("version %s\n"), VERSION));
+	server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("version %s\n"), FirmwareVersion::VersionString));
 	server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("boardType %d\n"), sys.boardType));
 	
 	if(includeWifi) {
@@ -1849,6 +2035,7 @@ void AmsWebServer::configFileDownload() {
 			if(strlen(wifi.dns2) > 0) server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("dns2 %s\n"), wifi.dns2));
 		}
 		server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("mdns %d\n"), wifi.mdns ? 1 : 0));
+		server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("use11b %d\n"), wifi.use11b ? 1 : 0));
 	}
 	
 	if(includeMqtt) {
@@ -1863,6 +2050,22 @@ void AmsWebServer::configFileDownload() {
 			if(includeSecrets) server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("mqttPassword %s\n"), mqtt.password));
 			server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("mqttPayloadFormat %d\n"), mqtt.payloadFormat));
 			server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("mqttSsl %d\n"), mqtt.ssl ? 1 : 0));
+
+			if(mqtt.payloadFormat == 3) {
+				DomoticzConfig domo;
+				config->getDomoticzConfig(domo);
+				server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("domoticzElidx %d\n"), domo.elidx));
+				server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("domoticzVl1idx %d\n"), domo.vl1idx));
+				server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("domoticzVl2idx %d\n"), domo.vl2idx));
+				server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("domoticzVl3idx %d\n"), domo.vl3idx));
+				server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("domoticzCl1idx %d\n"), domo.cl1idx));
+			} else if(mqtt.payloadFormat == 4) {
+				HomeAssistantConfig haconf;
+				config->getHomeAssistantConfig(haconf);
+				server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("homeAssistantDiscoveryPrefix %s\n"), haconf.discoveryPrefix));
+				server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("homeAssistantDiscoveryHostname %s\n"), haconf.discoveryHostname));
+				server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("homeAssistantDiscoveryNameTag %s\n"), haconf.discoveryNameTag));
+			}
 		}
 	}
 
@@ -1910,6 +2113,7 @@ void AmsWebServer::configFileDownload() {
 		GpioConfig gpio;
 		config->getGpioConfig(gpio);
 		if(gpio.hanPin != 0xFF) server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("gpioHanPin %d\n"), gpio.hanPin));
+		if(gpio.hanPin != 0xFF) server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("gpioHanPinPullup %d\n"), gpio.hanPinPullup ? 1 : 0));
 		if(gpio.apPin != 0xFF) server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("gpioApPin %d\n"), gpio.apPin));
 		if(gpio.ledPin != 0xFF) server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("gpioLedPin %d\n"), gpio.ledPin));
 		if(gpio.ledPin != 0xFF) server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("gpioLedInverted %d\n"), gpio.ledInverted ? 1 : 0));
@@ -1925,16 +2129,6 @@ void AmsWebServer::configFileDownload() {
 		server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("gpioVccBootLimit %.1f\n"), gpio.vccBootLimit / 10.0));
 		if(gpio.vccPin != 0xFF && gpio.vccResistorGnd != 0) server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("gpioVccResistorGnd %d\n"), gpio.vccResistorGnd));
 		if(gpio.vccPin != 0xFF && gpio.vccResistorVcc != 0) server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("gpioVccResistorVcc %d\n"), gpio.vccResistorVcc));
-	}
-
-	if(includeDomo) {
-		DomoticzConfig domo;
-		config->getDomoticzConfig(domo);
-		server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("domoticzElidx %d\n"), domo.elidx));
-		server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("domoticzVl1idx %d\n"), domo.vl1idx));
-		server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("domoticzVl2idx %d\n"), domo.vl2idx));
-		server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("domoticzVl3idx %d\n"), domo.vl3idx));
-		server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("domoticzCl1idx %d\n"), domo.cl1idx));
 	}
 
 	if(includeNtp) {
@@ -1953,6 +2147,7 @@ void AmsWebServer::configFileDownload() {
 		server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("entsoeArea %s\n"), entsoe.area));
 		server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("entsoeCurrency %s\n"), entsoe.currency));
 		server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("entsoeMultiplier %.3f\n"), entsoe.multiplier / 1000.0));
+		server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("entsoeFixedPrice %.3f\n"), entsoe.fixedPrice / 1000.0));
 	}
 
 	if(includeThresholds) {
@@ -2121,15 +2316,15 @@ void AmsWebServer::configFileDownload() {
 		EnergyAccountingConfig eac;
 		config->getEnergyAccountingConfig(eac);
 		EnergyAccountingData ead = ea->getData();
-		server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("energyaccounting %d %d %.2f %d %d %.2f %d %d %d %.2f %d %.2f %d %.2f %d %.2f %d %.2f"), 
+		server.sendContent(buf, snprintf_P(buf, BufferSize, PSTR("energyaccounting %d %d %.2f %.2f %.2f %.2f %.2f %.2f %d %.2f %d %.2f %d %.2f %d %.2f %d %.2f %.2f %.2f"), 
 			ead.version,
 			ead.month,
-			ead.costYesterday / 10.0,
-			ead.costThisMonth,
-			ead.costLastMonth,
-			ead.incomeYesterday / 10.0,
-			ead.incomeThisMonth,
-			ead.incomeLastMonth,
+			ea->getCostYesterday(),
+			ea->getCostThisMonth(),
+			ea->getCostLastMonth(),
+			ea->getIncomeYesterday(),
+			ea->getIncomeThisMonth(),
+			ea->getIncomeLastMonth(),
 			ead.peaks[0].day,
 			ead.peaks[0].value / 100.0,
 			ead.peaks[1].day,
@@ -2139,9 +2334,11 @@ void AmsWebServer::configFileDownload() {
 			ead.peaks[3].day,
 			ead.peaks[3].value / 100.0,
 			ead.peaks[4].day,
-			ead.peaks[4].value / 100.0
+			ead.peaks[4].value / 100.0,
+			ea->getUseLastMonth(),
+			ea->getProducedLastMonth()
 		));
-		server.sendContent("\n");
+		server.sendContent_P(PSTR("\n"));
 	}
 }
 
@@ -2152,12 +2349,16 @@ void AmsWebServer::configFileUpload() {
 	HTTPUpload& upload = uploadFile(FILE_CFG);
     if(upload.status == UPLOAD_FILE_END) {
 		performRestart = true;
-		server.sendHeader("Location","/");
+		server.sendHeader(HEADER_LOCATION,F("/"));
 		server.send(303);
 	}
 }
 
 void AmsWebServer::redirectToMain() {
-	server.sendHeader("Location","/");
+	server.sendHeader(HEADER_LOCATION,F("/"));
 	server.send(302);
+}
+
+void AmsWebServer::ssdpSchema() {
+	SSDP.schema(server.client());
 }

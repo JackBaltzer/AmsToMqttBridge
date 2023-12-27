@@ -9,6 +9,8 @@
     import CountrySelectOptions from './CountrySelectOptions.svelte';
     import { Link, navigate } from 'svelte-navigator';
     import SubnetOptions from './SubnetOptions.svelte';
+    import TrashIcon from './TrashIcon.svelte';
+    import QrCode from 'svelte-qrcode';
     
 
     export let sysinfo = {}
@@ -60,7 +62,7 @@
             e: { e: false, k: '', a: '' },
             m: { e: false, w: false, v: false, a: false, c: false }
         },
-        w: { s: '', p: '', w: 0.0, z: 255, a: true },
+        w: { s: '', p: '', w: 0.0, z: 255, a: true, b: true },
         n: {
             m: '', i: '', s: '', g: '', d1: '', d2: '', d: false, n1: '', n2: '', h: false
         },
@@ -79,7 +81,7 @@
             t: [0,0,0,0,0,0,0,0,0,0], h: 1
         },
         p: {
-            e: false, t: '', r: '', c: '', m: 1.0
+            e: false, t: '', r: '', c: '', m: 1.0, f: null
         },
         d: {
             s: false, t: false, l: 5
@@ -88,11 +90,18 @@
             i: 0, e: 0, v: 0, a: 0, r: 0, c: 0, t: 0, p: 0, d: 0, m: 0, s: 0
         },
         i: {
-            h: null, a: null,
+            h: { p: null, u: true },
+            a: null,
             l: { p: null, i: false },
             r: { r: null, g: null, b: null, i: false },
             t: { d: null, a: null },
             v: { p: null, d: { v: null, g: null }, o: null, m: null, b: null }
+        },
+        h: {
+            t: '', h: '', n: ''
+        },
+        c: {
+            es: null
         }
     };
     configurationStore.subscribe(update => {
@@ -162,6 +171,45 @@
       }
     }
 
+    async function askDeleteCa() {
+        if(confirm('Are you sure you want to delete CA?')) {
+            const response = await fetch('/mqtt-ca', {
+                method: 'POST'
+            });
+            let res = (await response.text())
+            configurationStore.update(c => {
+                c.q.s.c = false;
+                return c;
+            });
+        }
+    }
+
+    async function askDeleteCert() {
+        if(confirm('Are you sure you want to delete cert?')) {
+            const response = await fetch('/mqtt-cert', {
+                method: 'POST'
+            });
+            let res = (await response.text())
+            configurationStore.update(c => {
+                c.q.s.r = false;
+                return c;
+            });
+        }
+    }
+
+    async function askDeleteKey() {
+        if(confirm('Are you sure you want to delete key?')) {
+            const response = await fetch('/mqtt-key', {
+                method: 'POST'
+            });
+            let res = (await response.text())
+            configurationStore.update(c => {
+                c.q.s.k = false;
+                return c;
+            });
+        }
+    }
+
     const updateMqttPort = function() {
         if(configuration.q.s.e) {
             if(configuration.q.p == 1883) configuration.q.p = 8883;
@@ -198,49 +246,57 @@
             </div>
             <input type="hidden" name="p" value="true"/>
             <div class="my-1">
-                Price region<br/>
-                <select name="pr" bind:value={configuration.p.r} class="in-s">
-                    <optgroup label="Norway">
-                        <option value="10YNO-1--------2">NO1</option>
-                        <option value="10YNO-2--------T">NO2</option>
-                        <option value="10YNO-3--------J">NO3</option>
-                        <option value="10YNO-4--------9">NO4</option>
-                        <option value="10Y1001A1001A48H">NO5</option>
-                    </optgroup>
-                    <optgroup label="Sweden">
-                        <option value="10Y1001A1001A44P">SE1</option>
-                        <option value="10Y1001A1001A45N">SE2</option>
-                        <option value="10Y1001A1001A46L">SE3</option>
-                        <option value="10Y1001A1001A47J">SE4</option>
+                <div class="flex">
+                <div class="w-full">
+                    Price region<br/>
+                    <select name="pr" bind:value={configuration.p.r} class="in-f w-full">
+                        <optgroup label="Norway">
+                            <option value="10YNO-1--------2">NO1</option>
+                            <option value="10YNO-2--------T">NO2</option>
+                            <option value="10YNO-3--------J">NO3</option>
+                            <option value="10YNO-4--------9">NO4</option>
+                            <option value="10Y1001A1001A48H">NO5</option>
                         </optgroup>
-                    <optgroup label="Denmark">
-                        <option value="10YDK-1--------W">DK1</option>
-                        <option value="10YDK-2--------M">DK2</option>
-                    </optgroup>
-                    <option value="10YAT-APG------L">Austria</option>
-                    <option value="10YBE----------2">Belgium</option>
-                    <option value="10YCZ-CEPS-----N">Czech Republic</option>
-                    <option value="10Y1001A1001A39I">Estonia</option>
-                    <option value="10YFI-1--------U">Finland</option>
-                    <option value="10YFR-RTE------C">France</option>
-                    <option value="10Y1001A1001A83F">Germany</option>
-                    <option value="10YGB----------A">Great Britain</option>
-                    <option value="10YLV-1001A00074">Latvia</option>
-                    <option value="10YLT-1001A0008Q">Lithuania</option>
-                    <option value="10YNL----------L">Netherland</option>
-                    <option value="10YPL-AREA-----S">Poland</option>
-                    <option value="10YCH-SWISSGRIDZ">Switzerland</option>
-                </select>
+                        <optgroup label="Sweden">
+                            <option value="10Y1001A1001A44P">SE1</option>
+                            <option value="10Y1001A1001A45N">SE2</option>
+                            <option value="10Y1001A1001A46L">SE3</option>
+                            <option value="10Y1001A1001A47J">SE4</option>
+                            </optgroup>
+                        <optgroup label="Denmark">
+                            <option value="10YDK-1--------W">DK1</option>
+                            <option value="10YDK-2--------M">DK2</option>
+                        </optgroup>
+                        <option value="10YAT-APG------L">Austria</option>
+                        <option value="10YBE----------2">Belgium</option>
+                        <option value="10YCZ-CEPS-----N">Czech Republic</option>
+                        <option value="10Y1001A1001A39I">Estonia</option>
+                        <option value="10YFI-1--------U">Finland</option>
+                        <option value="10YFR-RTE------C">France</option>
+                        <option value="10Y1001A1001A83F">Germany</option>
+                        <option value="10YGB----------A">Great Britain</option>
+                        <option value="10YLV-1001A00074">Latvia</option>
+                        <option value="10YLT-1001A0008Q">Lithuania</option>
+                        <option value="10YNL----------L">Netherland</option>
+                        <option value="10YPL-AREA-----S">Poland</option>
+                        <option value="10YCH-SWISSGRIDZ">Switzerland</option>
+                    </select>
+                </div>
+                <div>
+                    Currency<br/>
+                    <select name="pc" bind:value={configuration.p.c} class="in-l">
+                        {#each ["NOK","SEK","DKK","EUR","CHF"] as c}
+                        <option value={c}>{c}</option>
+                        {/each}
+                    </select>
+                </div>
             </div>
+        </div>
             <div class="my-1">
                 <div class="flex">
                     <div class="w-1/2">
-                        Currency<br/>
-                        <select name="pc" bind:value={configuration.p.c} class="in-f w-full">
-                            {#each ["NOK","SEK","DKK","EUR"] as c}
-                            <option value={c}>{c}</option>
-                            {/each}
-                        </select>
+                        Fixed price<br/>
+                        <input name="pf" bind:value={configuration.p.f} type="number" min="0.001" max="65" step="0.001" class="in-f tr w-full"/>
                     </div>
                     <div class="w-1/2">
                         Multiplier<br/>
@@ -278,25 +334,26 @@
             <a href="{wiki('Meter-configuration')}" target="_blank" class="float-right"><HelpIcon/></a>
             <input type="hidden" name="m" value="true"/>
             <div class="my-1">
-                <span>Serial configuration</span>
-                <div class="flex">
-                    <select name="mb" bind:value={configuration.m.b} class="in-f">
+                <span class="float-right">Buffer size</span>
+                <span>Serial conf.</span>
+                <label class="mt-2 ml-3 whitespace-nowrap"><input name="mi" value="true" bind:checked={configuration.m.i} type="checkbox" class="rounded mb-1"/> inverted</label>
+                <div class="flex w-full">
+                    <select name="mb" bind:value={configuration.m.b} class="in-f tr w-1/2">
                         <option value={0} disabled={configuration.m.b != 0}>Autodetect</option>
                         {#each [24,48,96,192,384,576,1152] as b}
                         <option value={b*100}>{b*100}</option>
                         {/each}
                     </select>
-                    <select name="mp" bind:value={configuration.m.p} class="in-l" disabled={configuration.m.b == 0}>
+                    <select name="mp" bind:value={configuration.m.p} class="in-m" disabled={configuration.m.b == 0}>
                         <option value={0} disabled={configuration.m.b != 0}>-</option>
                         <option value={2}>7N1</option>
                         <option value={3}>8N1</option>
                         <option value={10}>7E1</option>
                         <option value={11}>8E1</option>
                     </select>
-                    <label class="mt-2 ml-3 whitespace-nowrap"><input name="mi" value="true" bind:checked={configuration.m.i} type="checkbox" class="rounded mb-1"/> inverted</label>
+                    <input name="ms" type="number" bind:value={configuration.m.s} min={64} max={sysinfo.chip == 'esp8266' ? configuration.i.h.p == 3 || configuration.i.h.p == 113 ? 512 : 128 : 4096} step={64} class="in-l tr w-1/2">
                 </div>
             </div>
-
             <div class="my-1">
                 Voltage<br/>
                 <select name="md" bind:value={configuration.m.d} class="in-s">
@@ -341,19 +398,19 @@
             <div class="flex my-1">
                 <div class="w-1/4">
                     Watt<br/>
-                    <input name="mmw" bind:value={configuration.m.m.w} type="number" min="0.00" max="655.35" step="0.01" class="in-f tr w-full"/>
+                    <input name="mmw" bind:value={configuration.m.m.w} type="number" min="0.00" max="1000" step="0.001" class="in-f tr w-full"/>
                 </div>
                 <div class="w-1/4">
                     Volt<br/>
-                    <input name="mmv" bind:value={configuration.m.m.v} type="number" min="0.00" max="655.35" step="0.01" class="in-m tr w-full"/>
+                    <input name="mmv" bind:value={configuration.m.m.v} type="number" min="0.00" max="1000" step="0.001" class="in-m tr w-full"/>
                 </div>
                 <div class="w-1/4">
                     Amp<br/>
-                    <input name="mma" bind:value={configuration.m.m.a} type="number" min="0.00" max="655.35" step="0.01" class="in-m tr w-full"/>
+                    <input name="mma" bind:value={configuration.m.m.a} type="number" min="0.00" max="1000" step="0.001" class="in-m tr w-full"/>
                 </div>
                 <div class="w-1/4">
                     kWh<br/>
-                    <input name="mmc" bind:value={configuration.m.m.c} type="number" min="0.00" max="655.35" step="0.01" class="in-l tr w-full"/>
+                    <input name="mmc" bind:value={configuration.m.m.c} type="number" min="0.00" max="1000" step="0.001" class="in-l tr w-full"/>
                 </div>
             </div>
             {/if}
@@ -389,7 +446,7 @@
                 </div>
             </div>
             <div class="my-3">
-                <label><input type="checkbox" name="wa" value="true" bind:checked={configuration.w.a} class="rounded mb-1"/> Auto reboot on connection problem</label>
+                <label><input type="checkbox" name="wb" value="true" bind:checked={configuration.w.b} class="rounded mb-1"/> Allow 802.11b legacy rates</label>
             </div>
         </div>
         <div class="cnt">
@@ -448,32 +505,33 @@
                 </div>
             </div>
             {#if configuration.q.s.e}
-            <div class="my-1">
-                <div>
-                    <Link to="/mqtt-ca">
-                        {#if configuration.q.s.c}
-                        <Badge color="green" text="CA OK" title="Click here to replace CA"/>
-                        {:else}
-                        <Badge color="blue" text="Upload CA" title="Click here to upload CA"/>
-                        {/if}
-                    </Link>
+            <div class="my-1 flex">
+                <span class="flex pr-2">
+                    {#if configuration.q.s.c}
+                    <span class="rounded-l-md bg-green-500 text-green-100 text-xs font-semibold px-2.5 py-1"><Link to="/mqtt-ca">CA OK</Link></span>
+                    <span class="rounded-r-md bg-red-500 text-red-100 text-xs px-2.5 py-1"  on:click={askDeleteCa} on:keypress={askDeleteCa}><TrashIcon/></span>
+                    {:else}
+                    <Link to="/mqtt-ca"><Badge color="blue" text="Upload CA" title="Click here to upload CA"/></Link>
+                    {/if}
+                </span>
 
-                    <Link to="/mqtt-cert">
-                        {#if configuration.q.s.r}
-                        <Badge color="green" text="Cert OK" title="Click here to replace certificate"/>
-                        {:else}
-                        <Badge color="blue" text="Upload cert" title="Click here to upload certificate"/>
-                        {/if}
-                    </Link>
+                <span class="flex pr-2">
+                    {#if configuration.q.s.r}
+                    <span class="rounded-l-md bg-green-500 text-green-100 text-xs font-semibold px-2.5 py-1"><Link to="/mqtt-cert">Cert OK</Link></span>
+                    <span class="rounded-r-md bg-red-500 text-red-100 text-xs px-2.5 py-1" on:click={askDeleteCert} on:keypress={askDeleteCert}><TrashIcon/></span>
+                    {:else}
+                    <Link to="/mqtt-cert"><Badge color="blue" text="Upload cert" title="Click here to upload certificate"/></Link>
+                    {/if}
+                </span>
 
-                    <Link to="/mqtt-key">
-                        {#if configuration.q.s.k}
-                        <Badge color="green" text="Key OK" title="Click here to replace key"/>
-                        {:else}
-                        <Badge color="blue" text="Upload key" title="Click here to upload key"/>
-                        {/if}
-                    </Link>
-                </div>
+                <span class="flex pr-2">
+                    {#if configuration.q.s.k}
+                    <span class="rounded-l-md bg-green-500 text-green-100 text-xs font-semibold px-2.5 py-1"><Link to="/mqtt-key">Key OK</Link></span>
+                    <span class="rounded-r-md bg-red-500 text-red-100 text-xs px-2.5 py-1" on:click={askDeleteKey} on:keypress={askDeleteKey}><TrashIcon/></span>
+                    {:else}
+                    <Link to="/mqtt-key"><Badge color="blue" text="Upload key" title="Click here to upload key"/></Link>
+                    {/if}
+                </span>
             </div>
             {/if}
             <div class="my-1">
@@ -531,7 +589,44 @@
             </div>
         </div>
         {/if}
-        {#if configuration.p.r.startsWith("10YNO") || configuration.p.r == '10Y1001A1001A48H'}
+        {#if configuration.q.m == 4}
+        <div class="cnt">
+            <strong class="text-sm">Home-Assistant</strong>
+            <a href="{wiki('MQTT-configuration#home-assistant')}" target="_blank" class="float-right"><HelpIcon/></a>
+            <input type="hidden" name="h" value="true"/>
+            <div class="my-1">
+                Discovery topic prefix<br/>
+                <input name="ht" bind:value={configuration.h.t} type="text" class="in-s" placeholder="homeassistant"/>
+            </div>
+            <div class="my-1">
+                Hostname for URL<br/>
+                <input name="hh" bind:value={configuration.h.h} type="text" class="in-s" placeholder="{configuration.g.h}.local"/>
+            </div>
+            <div class="my-1">
+                Name tag<br/>
+                <input name="hn" bind:value={configuration.h.n} type="text" class="in-s"/>
+            </div>
+        </div>
+        {/if}
+        {#if configuration.c.es != null}
+        <div class="cnt">
+            <input type="hidden" name="c" value="true"/>
+            <strong class="text-sm">Cloud connections</strong>
+            <div class="my-1">
+                <label><input type="checkbox" class="rounded mb-1" name="ces" value="true" bind:checked={configuration.c.es}/> Energy Speedometer</label>
+                {#if configuration.c.es}
+                <div class="pl-5">MAC: {sysinfo.mac}</div>
+                <div class="pl-5">Meter ID: {sysinfo.meter.id ? sysinfo.meter.id : "missing, required"}</div>
+                {#if sysinfo.mac && sysinfo.meter.id}
+                <div class="pl-2">
+                    <QrCode value='{'{'}"mac":"{sysinfo.mac}","meter":"{sysinfo.meter.id}"{'}'}'/>
+                </div>
+                {/if}
+                {/if}
+            </div>
+        </div>
+        {/if}
+        {#if configuration.p.r.startsWith("10YNO") || configuration.p.r.startsWith('10Y1001A1001A4')}
         <div class="cnt">
             <strong class="text-sm">Tariff thresholds</strong>
             <a href="{wiki('Threshold-configuration')}" target="_blank" class="float-right"><HelpIcon/></a>
@@ -540,7 +635,7 @@
                 {#each {length: 9} as _, i}
                 <label class="flex w-40 m-1">
                     <span class="in-pre">{i+1}</span>
-                    <input name="t{i}" bind:value={configuration.t.t[i]} type="number" min="0" max="255" class="in-txt w-full"/>
+                    <input name="t{i}" bind:value={configuration.t.t[i]} type="number" min="0" max="65535" class="in-txt w-full"/>
                     <span class="in-post">kWh</span>
                 </label>
                 {/each}
@@ -577,8 +672,8 @@
             <input type="hidden" name="i" value="true"/>
             <div class="flex flex-wrap">
                 <div class="w-1/3">
-                    HAN<br/>
-                    <select name="ih" bind:value={configuration.i.h} class="in-f w-full">
+                    HAN<label class="ml-2"><input name="ihu" value="true" bind:checked={configuration.i.h.u} type="checkbox" class="rounded mb-1"/> pullup</label><br/>
+                    <select name="ihp" bind:value={configuration.i.h.p} class="in-f w-full">
                         <UartSelectOptions chip={sysinfo.chip}/>
                     </select>
                 </div>

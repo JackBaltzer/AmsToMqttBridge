@@ -4,13 +4,14 @@
 #include "Arduino.h"
 
 #define EEPROM_SIZE 1024*3
-#define EEPROM_CHECK_SUM 101 // Used to check if config is stored. Change if structure changes
+#define EEPROM_CHECK_SUM 103 // Used to check if config is stored. Change if structure changes
 #define EEPROM_CLEARED_INDICATOR 0xFC
 #define EEPROM_CONFIG_ADDRESS 0
 #define EEPROM_TEMP_CONFIG_ADDRESS 2048
 
 #define CONFIG_SYSTEM_START 8
 #define CONFIG_METER_START 32
+#define CONFIG_UPGRADE_INFO_START 216
 #define CONFIG_UI_START 248
 #define CONFIG_GPIO_START 266
 #define CONFIG_ENTSOE_START 290
@@ -21,6 +22,7 @@
 #define CONFIG_DOMOTICZ_START 856 
 #define CONFIG_NTP_START 872
 #define CONFIG_MQTT_START 1004
+#define CONFIG_HA_START 1680
 
 #define CONFIG_METER_START_93 224
 
@@ -31,7 +33,8 @@ struct SystemConfig {
 	bool userConfigured;
 	uint8_t dataCollectionConsent; // 0 = unknown, 1 = accepted, 2 = declined
 	char country[3];
-}; // 7
+	uint8_t energyspeedometer;
+}; // 8
 
 struct WiFiConfig {
 	char ssid[32];
@@ -45,8 +48,8 @@ struct WiFiConfig {
 	bool mdns;
 	uint8_t power;
 	uint8_t sleep;
-	uint8_t mode;
-	bool autoreboot;
+	uint8_t use11b;
+	bool unused;
 }; // 213
 
 struct MqttConfig {
@@ -82,7 +85,8 @@ struct MeterConfig {
 	uint32_t accumulatedMultiplier;
 	uint8_t source;
 	uint8_t parser;
-}; // 61
+	uint8_t bufferSize;
+}; // 62
 
 struct MeterConfig100 {
 	uint32_t baud;
@@ -141,7 +145,8 @@ struct GpioConfig {
 	uint8_t vccBootLimit;
 	uint16_t vccResistorGnd;
 	uint16_t vccResistorVcc;
-}; // 20
+	bool hanPinPullup;
+}; // 21
 
 struct DomoticzConfig {
 	uint16_t elidx;
@@ -150,6 +155,12 @@ struct DomoticzConfig {
 	uint16_t vl3idx;
 	uint16_t cl1idx;
 }; // 10
+
+struct HomeAssistantConfig {
+	char discoveryPrefix[64];
+	char discoveryHostname[64];
+	char discoveryNameTag[16];
+}; // 145
 
 struct NtpConfig {
 	bool enable;
@@ -172,9 +183,15 @@ struct EntsoeConfig {
 	char currency[4];
 	uint32_t multiplier;
 	bool enabled;
-}; // 62
+	uint16_t fixedPrice;
+}; // 64
 
 struct EnergyAccountingConfig {
+	uint16_t thresholds[10];
+	uint8_t hours;
+}; // 21
+
+struct EnergyAccountingConfig101 {
 	uint8_t thresholds[10];
 	uint8_t hours;
 }; // 11
@@ -199,6 +216,13 @@ struct TempSensorConfig {
 	bool common;
 };
 
+struct UpgradeInformation {
+	char fromVersion[8];
+	char toVersion[8];
+	int16_t exitCode;
+	int16_t errorCode;
+}; // 20
+
 class AmsConfiguration {
 public:
 	bool hasConfig();
@@ -208,6 +232,8 @@ public:
 
 	bool getSystemConfig(SystemConfig&);
 	bool setSystemConfig(SystemConfig&);
+	bool isSystemConfigChanged();
+	void ackSystemConfigChanged();
 
 	bool getWiFiConfig(WiFiConfig&);
 	bool setWiFiConfig(WiFiConfig&);
@@ -230,6 +256,7 @@ public:
 	bool getMeterConfig(MeterConfig&);
 	bool setMeterConfig(MeterConfig&);
 	void clearMeter(MeterConfig&);
+	void setMeterChanged();
 	bool isMeterChanged();
 	void ackMeterChanged();
 
@@ -248,8 +275,10 @@ public:
 	bool getDomoticzConfig(DomoticzConfig&);
 	bool setDomoticzConfig(DomoticzConfig&);
 	void clearDomo(DomoticzConfig&);
-	bool isDomoChanged();
-	void ackDomoChange();
+
+	bool getHomeAssistantConfig(HomeAssistantConfig&);
+	bool setHomeAssistantConfig(HomeAssistantConfig&);
+	void clearHomeAssistantConfig(HomeAssistantConfig&);
 	
 	bool getNtpConfig(NtpConfig&);
 	bool setNtpConfig(NtpConfig&);
@@ -281,6 +310,10 @@ public:
 
     bool isSensorAddressEqual(uint8_t a[8], uint8_t b[8]);
 
+	bool getUpgradeInformation(UpgradeInformation&);
+	bool setUpgradeInformation(int16_t exitCode, int16_t errorCode, const char* currentVersion, const char* nextVersion);
+	void clearUpgradeInformation(UpgradeInformation&);
+
 	void clear();
 
 protected:
@@ -288,7 +321,7 @@ protected:
 private:
 	uint8_t configVersion = 0;
 
-	bool wifiChanged, mqttChanged, meterChanged = true, domoChanged, ntpChanged = true, entsoeChanged = false, energyAccountingChanged = true;
+	bool sysChanged = false, wifiChanged = false, mqttChanged = false, meterChanged = true, ntpChanged = true, entsoeChanged = false, energyAccountingChanged = true;
 
 	uint8_t tempSensorCount = 0;
 	TempSensorConfig** tempSensors = NULL;
@@ -298,9 +331,12 @@ private:
 	bool relocateConfig95(); // 2.1.4
 	bool relocateConfig96(); // 2.1.14
 	bool relocateConfig100(); // 2.2-dev
+	bool relocateConfig101(); // 2.2.0 through 2.2.8
+	bool relocateConfig102(); // 2.2.9 through 2.2.11
 
 	void saveToFs();
 	bool loadFromFs(uint8_t version);
 	void deleteFromFs(uint8_t version);
 };
 #endif
+

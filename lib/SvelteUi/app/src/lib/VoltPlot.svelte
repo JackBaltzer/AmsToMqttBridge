@@ -12,6 +12,7 @@
     function point(v) {
         return {
             label: fmtnum(v) + 'V', 
+            title: v.toFixed(1) + ' V',
             value: isNaN(v) ? 0 : v, 
             color: voltcol(v ? v : 0) 
         };
@@ -33,6 +34,7 @@
             points.push(point(u3));
         }
         config = {
+            title: 'Voltage',
             padding: { top: 20, right: 15, bottom: 20, left: 35 },
             y: {
                 min: 200,

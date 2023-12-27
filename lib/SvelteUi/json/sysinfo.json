@@ -2,6 +2,7 @@
     "version": "%s",
     "chip": "%s",
     "chipId": "%s",
+    "cpu": %d,
     "mac": "%s",
     "apmac": "%s",
     "board": %d,
@@ -36,5 +37,20 @@
         "m": %d,
         "s": %d
     },
-    "security": %d
+    "security": %d,
+    "boot_reason": %d,
+    "ex_cause": %d,
+    "upgrade": {
+        "x": %d,
+        "e": %d,
+        "f": "%s",
+        "t": "%s"
+    },
+    "last_month": {
+        "u" : %.2f,
+        "c" : %.2f,
+        "p" : %.2f,
+        "i" : %.2f
+    },
+    "clock_offset": %d
 }

@@ -7,6 +7,7 @@
     export let u3;
     export let i1;
     export let i2;
+    export let i2e;
     export let i3;
     export let max;
 
@@ -14,7 +15,8 @@
 
     function point(v) {
         return {
-            label: fmtnum(v) +'A', 
+            label: fmtnum(v) + 'A',
+            title: v.toFixed(1) + ' A',
             value: isNaN(v) ? 0 : v, 
             color: ampcol(v ? (v)/(max)*100 : 0) 
         };
@@ -28,14 +30,26 @@
             points.push(point(i1));
         }
         if(u2 > 0) {
-            xTicks.push({ label: 'L2' });
-            points.push(point(i2));
+            if(i2e) {
+                xTicks.push({ label: 'L2' });
+                points.push({
+                    label: 'Not available',
+                    labelAngle: -90,
+                    title: 'L2 current is not reported by your meter',
+                    value: 0,
+                    color: '#7c3aedcc' 
+                });
+            } else {
+                xTicks.push({ label: 'L2' });
+                points.push(point(i2));
+            }
         }
         if(u3 > 0) {
             xTicks.push({ label: 'L3' });
             points.push(point(i3));
         }
         config = {
+            title: 'Amperage',
             padding: { top: 20, right: 15, bottom: 20, left: 35 },
             y: {
                 min: 0,

@@ -26,6 +26,7 @@ public:
     char* getToken();
     char* getCurrency();
     char* getArea();
+    char* getSource();
     float getValueForHour(int8_t);
     float getValueForHour(time_t, int8_t);
 
@@ -34,10 +35,11 @@ public:
 private:
     RemoteDebug* debugger;
     EntsoeConfig* config = NULL;
-    HTTPClient http;
+    HTTPClient* http = NULL;
 
     uint8_t currentDay = 0, currentHour = 0;
     uint8_t tomorrowFetchMinute = 15; // How many minutes over 13:00 should it fetch prices
+    uint8_t nextFetchDelayMinutes = 15;
     uint64_t lastTodayFetch = 0;
     uint64_t lastTomorrowFetch = 0;
     uint64_t lastCurrencyFetch = 0;
@@ -61,8 +63,6 @@ private:
     bool retrieve(const char* url, Stream* doc);
     float getCurrencyMultiplier(const char* from, const char* to, time_t t);
 
-	void printD(String fmt, ...);
-	void printE(String fmt, ...);
     void debugPrint(byte *buffer, int start, int length);
 };
 #endif

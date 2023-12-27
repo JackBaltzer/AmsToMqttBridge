@@ -37,7 +37,7 @@
         <div class="cnt">
             <div class="grid grid-cols-2">
                 <div class="col-span-2">
-                    <PowerGauge val={data.i ? data.i : 0} max={data.im ? data.im : 15000} unit="W" label="Import" sub={data.p} subunit={prices.currency} colorFn={ampcol}/>
+                    <PowerGauge val={data.i ? data.i : 0} max={data.im ? data.im : 15000} unit="W" label="Import" sub={data.p} subunit={data.pc} colorFn={ampcol}/>
                 </div>
                 <div>{data.mt ? metertype(data.mt) : '-'}</div>
                 <div class="text-right">{data.ic ? data.ic.toFixed(1) : '-'} kWh</div>
@@ -62,7 +62,7 @@
     {/if}
     {#if uiVisibility(sysinfo.ui.a, data.i1 > 0.01 || data.i2 > 0.01 || data.i3 > 0.01)}
         <div class="cnt">
-            <AmpPlot u1={data.u1} u2={data.u2} u3={data.u3} i1={data.i1} i2={data.i2} i3={data.i3} max={data.mf ? data.mf : 32}/>
+            <AmpPlot u1={data.u1} u2={data.u2} u3={data.u3} i1={data.i1} i2={data.i2} i2e={data.i2e} i3={data.i3} max={data.mf ? data.mf : 32}/>
         </div>
     {/if}
     {#if uiVisibility(sysinfo.ui.r, data.ri > 0 || data.re > 0 || data.ric > 0 || data.rec > 0)}
@@ -72,27 +72,27 @@
     {/if}
     {#if uiVisibility(sysinfo.ui.c, data.ea)}
         <div class="cnt">
-            <AccountingData data={data.ea} currency={prices.currency} hasExport={data.om > 0 || data.e > 0}/>
+            <AccountingData sysinfo={sysinfo} data={data.ea} currency={data.pc} hasExport={data.om > 0 || data.e > 0}/>
         </div>
     {/if}
-    {#if uiVisibility(sysinfo.ui.t, data.pr && (data.pr.startsWith("10YNO") || data.pr == '10Y1001A1001A48H'))}
+    {#if uiVisibility(sysinfo.ui.t, data.pr && (data.pr.startsWith("10YNO") || data.pr.startsWith('10Y1001A1001A4')))}
         <div class="cnt h-64">
             <TariffPeakChart />
         </div>
     {/if}
-    {#if uiVisibility(sysinfo.ui.p, (typeof data.p == "number") && !Number.isNaN(data.p))}
+    {#if uiVisibility(sysinfo.ui.p, data.pe && !Number.isNaN(data.p))}
         <div class="cnt gwf">
-            <PricePlot json={prices}/>
+            <PricePlot json={prices} sysinfo={sysinfo}/>
         </div>
     {/if}
     {#if uiVisibility(sysinfo.ui.d, dayPlot)}
         <div class="cnt gwf">
-            <DayPlot json={dayPlot} />
+            <DayPlot json={dayPlot} sysinfo={sysinfo}/>
         </div>
     {/if}
     {#if uiVisibility(sysinfo.ui.m, monthPlot)}
         <div class="cnt gwf">
-            <MonthPlot json={monthPlot} />
+            <MonthPlot json={monthPlot} sysinfo={sysinfo}/>
         </div>
     {/if}
     {#if uiVisibility(sysinfo.ui.s, data.t && data.t != -127 && temperatures.c > 1)}

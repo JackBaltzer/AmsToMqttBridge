@@ -2,9 +2,10 @@
 #include "lwip/def.h"
 #include "Timezone.h"
 #include "ntohll.h"
+#include "Uptime.h"
 
-IEC6205675::IEC6205675(const char* d, uint8_t useMeterType, MeterConfig* meterConfig, DataParserContext &ctx) {
-    double val;
+IEC6205675::IEC6205675(const char* d, uint8_t useMeterType, MeterConfig* meterConfig, DataParserContext &ctx, AmsData &state) {
+    float val;
     char str[64];
 
     TimeChangeRule CEST = {"CEST", Last, Sun, Mar, 2, 120};
@@ -24,7 +25,7 @@ IEC6205675::IEC6205675(const char* d, uint8_t useMeterType, MeterConfig* meterCo
             memcpy(str, data->oct.data, data->oct.length);
             str[data->oct.length] = 0x00;
             String listId = String(str);
-            if(listId.startsWith("KFM_001")) {
+            if(listId.startsWith(F("KFM_001"))) {
                 this->listId = listId;
                 meterType = AmsTypeKaifa;
 
@@ -99,9 +100,7 @@ IEC6205675::IEC6205675(const char* d, uint8_t useMeterType, MeterConfig* meterCo
 
                 if(listType >= 2 && memcmp(meterModel.c_str(), "MA304T3", 7) == 0) {
                     l2voltage = sqrt(pow(l1voltage - l3voltage * cos(60 * (PI/180)), 2) + pow(l3voltage * sin(60 * (PI/180)),2));
-                    if(l2voltage > 0) {
-                        l2current = (((activeImportPower - activeExportPower) * sqrt(3)) - (l1voltage * l1current) - (l3voltage * l3current)) / l2voltage;
-                    }
+                    l2currentMissing = true;
                 }
 
                 if(listType == 3) {
@@ -127,14 +126,89 @@ IEC6205675::IEC6205675(const char* d, uint8_t useMeterType, MeterConfig* meterCo
                     reactiveExportCounter = ntohl(data->dlu.data) / 1000.0;
                 }
 
-                lastUpdateMillis = millis();
+                lastUpdateMillis = millis64();
+            } else if(listId.startsWith("ISK")) { // Iskra special case
+                this->listId = listId;
+                meterType = AmsTypeIskra;
+
+                int idx = 0;
+                data = getCosemDataAt(idx++, ((char *) (d)));
+                if(data->base.length == 0x12) {
+                    listType = 2;
+
+                    idx++;
+                    data = getCosemDataAt(idx++, ((char *) (d)));
+                    memcpy(str, data->oct.data, data->oct.length);
+                    str[data->oct.length] = 0x00;
+                    meterId = String(str);
+
+                    data = getCosemDataAt(idx++, ((char *) (d)));
+                    activeImportPower = ntohl(data->dlu.data);
+                    data = getCosemDataAt(idx++, ((char *) (d)));
+                    activeExportPower = ntohl(data->dlu.data);
+
+                    data = getCosemDataAt(idx++, ((char *) (d)));
+                    reactiveImportPower = ntohl(data->dlu.data);
+                    data = getCosemDataAt(idx++, ((char *) (d)));
+                    reactiveExportPower = ntohl(data->dlu.data);
+
+                    data = getCosemDataAt(idx++, ((char *) (d)));
+                    l1voltage = ntohs(data->lu.data) / 10.0;
+                    data = getCosemDataAt(idx++, ((char *) (d)));
+                    l2voltage = ntohs(data->lu.data) / 10.0;
+                    data = getCosemDataAt(idx++, ((char *) (d)));
+                    l3voltage = ntohs(data->lu.data) / 10.0;
+
+                    data = getCosemDataAt(idx++, ((char *) (d)));
+                    l1current = ntohs(data->lu.data) / 100.0;
+                    data = getCosemDataAt(idx++, ((char *) (d)));
+                    l2current = ntohs(data->lu.data) / 100.0;
+                    data = getCosemDataAt(idx++, ((char *) (d)));
+                    l3current = ntohs(data->lu.data) / 100.0;
+
+                    data = getCosemDataAt(idx++, ((char *) (d)));
+                    l1activeImportPower = ntohl(data->dlu.data);
+                    data = getCosemDataAt(idx++, ((char *) (d)));
+                    l2activeImportPower = ntohl(data->dlu.data);
+                    data = getCosemDataAt(idx++, ((char *) (d)));
+                    l3activeImportPower = ntohl(data->dlu.data);
+
+                    data = getCosemDataAt(idx++, ((char *) (d)));
+                    l1activeExportPower = ntohl(data->dlu.data);
+                    data = getCosemDataAt(idx++, ((char *) (d)));
+                    l2activeExportPower = ntohl(data->dlu.data);
+                    data = getCosemDataAt(idx++, ((char *) (d)));
+                    l3activeExportPower = ntohl(data->dlu.data);
+                    
+                    lastUpdateMillis = millis64();
+                } else if(data->base.length == 0x0C) {
+                    apply(state);
+                    
+                    listType = 3;
+                    idx += 4;
+
+                    data = getCosemDataAt(idx++, ((char *) (d)));
+                    activeImportCounter = ntohl(data->dlu.data) / 1000.0;
+                    idx += 2;
+                    
+                    data = getCosemDataAt(idx++, ((char *) (d)));
+                    activeExportCounter = ntohl(data->dlu.data) / 1000.0;
+                    idx += 2;
+
+                    data = getCosemDataAt(idx++, ((char *) (d)));
+                    reactiveImportCounter = ntohl(data->dlu.data) / 1000.0;
+                    data = getCosemDataAt(idx++, ((char *) (d)));
+                    reactiveExportCounter = ntohl(data->dlu.data) / 1000.0;
+
+                    lastUpdateMillis = millis64();
+                }
             }
         } else if(useMeterType == AmsTypeKaifa && data->base.type == CosemTypeDLongUnsigned) {
             this->packageTimestamp = this->packageTimestamp > 0 ? tz.toUTC(this->packageTimestamp) : 0;
             listType = 1;
             meterType = AmsTypeKaifa;
             activeImportPower = ntohl(data->dlu.data);
-            lastUpdateMillis = millis();
+            lastUpdateMillis = millis64();
         }
         // Kaifa end
     } else {
@@ -163,11 +237,15 @@ IEC6205675::IEC6205675(const char* d, uint8_t useMeterType, MeterConfig* meterCo
         if(meterType == AmsTypeUnknown) {
             if(memcmp(ctx.system_title, "SAGY", 4) == 0) {
                 meterType = AmsTypeSagemcom;
+            } else if(memcmp(ctx.system_title, "KFM", 3) == 0) {
+                meterType = AmsTypeKaifa;
             }
         }
 
-        if(meterType == AmsTypeKamstrup || meterType == AmsTypeAidon) {
-            this->packageTimestamp = this->packageTimestamp > 0 ? tz.toUTC(this->packageTimestamp) : 0;
+        if(this->packageTimestamp > 0) {
+            if(meterType == AmsTypeAidon || meterType == AmsTypeKamstrup) {
+                this->packageTimestamp = this->packageTimestamp - 3600;
+            }
         }
 
         uint8_t str_len = 0;
@@ -216,6 +294,8 @@ IEC6205675::IEC6205675(const char* d, uint8_t useMeterType, MeterConfig* meterCo
         if(val != NOVALUE) {
             listType = 2;
             l2current = val;
+        } else if(listType == 2) {
+            l2currentMissing = true;
         }
         val = getNumber(AMS_OBIS_CURRENT_L3, sizeof(AMS_OBIS_CURRENT_L3), ((char *) (d)));
         if(val != NOVALUE) {
@@ -268,10 +348,8 @@ IEC6205675::IEC6205675(const char* d, uint8_t useMeterType, MeterConfig* meterCo
         if(meterTs != NULL) {
             AmsOctetTimestamp* amst = (AmsOctetTimestamp*) meterTs;
             time_t ts = decodeCosemDateTime(amst->dt);
-            if(meterType == AmsTypeAidon) {
+            if(meterType == AmsTypeAidon || meterType == AmsTypeKamstrup) {
                 meterTimestamp = ts - 3600;
-            } else if(meterType == AmsTypeKamstrup) {
-                meterTimestamp = tz.toUTC(ts);
             } else {
                 meterTimestamp = ts;
             }
@@ -374,22 +452,9 @@ IEC6205675::IEC6205675(const char* d, uint8_t useMeterType, MeterConfig* meterCo
                         break;
                 }
             }
-        } else if(meterType == AmsTypeKaifa) {
-            if(l1current != 0)
-                l1current /= 1000;
-            if(l2current != 0)
-                l2current /= 1000;
-            if(l3current != 0)
-                l3current /= 1000;
-            if(l1voltage != 0)
-                l1voltage /= 10;
-            if(l2voltage != 0)
-                l2voltage /= 10;
-            if(l3voltage != 0)
-                l3voltage /= 10;
         }
 
-        lastUpdateMillis = millis();
+        lastUpdateMillis = millis64();
     }
 
     if(meterConfig->wattageMultiplier > 0) {
@@ -421,14 +486,7 @@ IEC6205675::IEC6205675(const char* d, uint8_t useMeterType, MeterConfig* meterCo
 
     // Special case for Norwegian IT/TT meters that does not report all values
     if(meterConfig->distributionSystem == 1) {
-        if(threePhase) {
-            if(l2current == 0.0 && l1current > 0.0 && l3current > 0.0) {
-                l2current = (((activeImportPower - activeExportPower) * sqrt(3)) - (l1voltage * l1current) - (l3voltage * l3current)) / l2voltage;
-                if(activeExportPower == 0.0) {
-                    l2current = max((float) 0.0, l2current);
-                }
-            }
-        } else if(twoPhase && l1current > 0.0 && l2current > 0.0 && l3current > 0.0) {
+        if(twoPhase && l1current > 0.0 && l2current > 0.0 && l3current > 0.0) {
             l2voltage = sqrt(pow(l1voltage - l3voltage * cos(60.0 * (PI/180.0)), 2) + pow(l3voltage * sin(60.0 * (PI/180.0)),2));
             threePhase = true;
         }
@@ -537,49 +595,49 @@ uint8_t IEC6205675::getString(uint8_t* obis, int matchlength, const char* ptr, c
     return 0;
 }
 
-double IEC6205675::getNumber(uint8_t* obis, int matchlength, const char* ptr) {
+float IEC6205675::getNumber(uint8_t* obis, int matchlength, const char* ptr) {
     CosemData* item = findObis(obis, matchlength, ptr);
     return getNumber(item);
 }
 
-double IEC6205675::getNumber(CosemData* item) {
+float IEC6205675::getNumber(CosemData* item) {
     if(item != NULL) {
-        double ret = 0.0;
+        float ret = 0.0;
         char* pos = ((char*) item);
         switch(item->base.type) {
             case CosemTypeLongSigned: {
                 int16_t i16 = ntohs(item->ls.data);
-                ret = i16;
+                ret = (i16 * 1.0);
                 pos += 3;
                 break;
             }
             case CosemTypeLongUnsigned: {
                 uint16_t u16 = ntohs(item->lu.data);
-                ret = u16;
+                ret = (u16 * 1.0);
                 pos += 3;
                 break;
             }
             case CosemTypeDLongSigned: {
                 int32_t i32 = ntohl(item->dlu.data);
-                ret = i32;
+                ret = (i32 * 1.0);
                 pos += 5;
                 break;
             }
             case CosemTypeDLongUnsigned: {
                 uint32_t u32 = ntohl(item->dlu.data);
-                ret = u32;
+                ret = (u32 * 1.0);
                 pos += 5;
                 break;
             }
             case CosemTypeLong64Signed: {
                 int64_t i64 = ntohll(item->l64s.data);
-                ret = i64;
+                ret = (i64 * 1.0);
                 pos += 9;
                 break;
             }
             case CosemTypeLong64Unsigned: {
                 uint64_t u64 = ntohll(item->l64u.data);
-                ret = u64;
+                ret = (u64 * 1.0);
                 pos += 9;
                 break;
             }

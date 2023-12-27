@@ -14,6 +14,21 @@ struct EnergyAccountingPeak {
 struct EnergyAccountingData {
     uint8_t version;
     uint8_t month;
+    int32_t costYesterday;
+    int32_t costThisMonth;
+    int32_t costLastMonth;
+    int32_t incomeYesterday;
+    int32_t incomeThisMonth;
+    int32_t incomeLastMonth;
+    uint32_t lastMonthImport;
+    uint32_t lastMonthExport;
+    uint8_t lastMonthAccuracy;
+    EnergyAccountingPeak peaks[5];
+};
+
+struct EnergyAccountingData5 {
+    uint8_t version;
+    uint8_t month;
     uint16_t costYesterday;
     uint16_t costThisMonth;
     uint16_t costLastMonth;
@@ -32,7 +47,7 @@ struct EnergyAccountingData4 {
     EnergyAccountingPeak peaks[5];
 };
 
-struct EnergyAccountingData1 {
+struct EnergyAccountingData2 {
     uint8_t version;
     uint8_t month;
     uint16_t maxHour;
@@ -41,10 +56,25 @@ struct EnergyAccountingData1 {
     uint16_t costLastMonth;
 };
 
+struct EnergyAccountingRealtimeData {
+    uint8_t magic;
+    uint8_t currentHour;
+    uint8_t currentDay;
+    uint8_t currentThresholdIdx;
+    float use;
+    float costHour;
+    float costDay;
+    float produce;
+    float incomeHour;
+    float incomeDay;
+    unsigned long lastImportUpdateMillis;
+    unsigned long lastExportUpdateMillis;
+};
+
 
 class EnergyAccounting {
 public:
-    EnergyAccounting(RemoteDebug*);
+    EnergyAccounting(RemoteDebug*, EnergyAccountingRealtimeData*);
     void setup(AmsDataStorage *ds, EnergyAccountingConfig *config);
     void setEapi(EntsoeApi *eapi);
     void setTimezone(Timezone*);
@@ -52,26 +82,29 @@ public:
     bool update(AmsData* amsData);
     bool load();
     bool save();
+    bool isInitialized();
 
-    double getUseThisHour();
-    double getUseToday();
-    double getUseThisMonth();
+    float getUseThisHour();
+    float getUseToday();
+    float getUseThisMonth();
+    float getUseLastMonth();
 
-    double getProducedThisHour();
-    double getProducedToday();
-    double getProducedThisMonth();
+    float getProducedThisHour();
+    float getProducedToday();
+    float getProducedThisMonth();
+    float getProducedLastMonth();
 
-    double getCostThisHour();
-    double getCostToday();
-    double getCostYesterday();
-    double getCostThisMonth();
-    uint16_t getCostLastMonth();
+    float getCostThisHour();
+    float getCostToday();
+    float getCostYesterday();
+    float getCostThisMonth();
+    float getCostLastMonth();
 
-    double getIncomeThisHour();
-    double getIncomeToday();
-    double getIncomeYesterday();
-    double getIncomeThisMonth();
-    uint16_t getIncomeLastMonth();
+    float getIncomeThisHour();
+    float getIncomeToday();
+    float getIncomeYesterday();
+    float getIncomeThisMonth();
+    float getIncomeLastMonth();
 
     float getMonthMax();
     uint8_t getCurrentThreshold();
@@ -80,18 +113,20 @@ public:
     EnergyAccountingData getData();
     void setData(EnergyAccountingData&);
 
+    void setFixedPrice(float price, String currency);
+    float getPriceForHour(uint8_t h);
+
 private:
     RemoteDebug* debugger = NULL;
-    unsigned long lastUpdateMillis = 0;
     bool init = false, initPrice = false;
     AmsDataStorage *ds = NULL;
     EntsoeApi *eapi = NULL;
     EnergyAccountingConfig *config = NULL;
     Timezone *tz = NULL;
-    uint8_t currentHour = 0, currentDay = 0, currentThresholdIdx = 0;
-    double use = 0, costHour = 0, costDay = 0;
-    double produce = 0, incomeHour = 0, incomeDay = 0;
-    EnergyAccountingData data = { 0, 0, 0, 0, 0, 0 };
+    EnergyAccountingData data = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    EnergyAccountingRealtimeData* realtimeData = NULL;
+    float fixedPrice = 0;
+    String currency = "";
 
     void calcDayCost();
     bool updateMax(uint16_t val, uint8_t day);

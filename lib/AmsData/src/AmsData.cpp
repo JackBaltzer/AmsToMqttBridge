@@ -67,6 +67,7 @@ void AmsData::apply(AmsData& other) {
             this->reactiveExportPower = other.getReactiveExportPower();
             this->l1current = other.getL1Current();
             this->l2current = other.getL2Current();
+            this->l2currentMissing = other.isL2currentMissing();
             this->l3current = other.getL3Current();
             this->l1voltage = other.getL1Voltage();
             this->l2voltage = other.getL2Voltage();
@@ -82,7 +83,7 @@ void AmsData::apply(AmsData& other) {
         this->activeExportPower = other.getActiveExportPower();
 }
 
-unsigned long AmsData::getLastUpdateMillis() {
+uint64_t AmsData::getLastUpdateMillis() {
     return this->lastUpdateMillis;
 }
 
@@ -114,19 +115,19 @@ time_t AmsData::getMeterTimestamp() {
     return this->meterTimestamp;
 }
 
-uint16_t AmsData::getActiveImportPower() {
+uint32_t AmsData::getActiveImportPower() {
     return this->activeImportPower;
 }
 
-uint16_t AmsData::getReactiveImportPower() {
+uint32_t AmsData::getReactiveImportPower() {
     return this->reactiveImportPower;
 }
 
-uint16_t AmsData::getActiveExportPower() {
+uint32_t AmsData::getActiveExportPower() {
     return this->activeExportPower;
 }
 
-uint16_t AmsData::getReactiveExportPower() {
+uint32_t AmsData::getReactiveExportPower() {
     return this->reactiveExportPower;
 }
 
@@ -218,8 +219,12 @@ bool AmsData::isTwoPhase() {
     return this->twoPhase;
 }
 
+bool AmsData::isL2currentMissing() {
+    return this->l2currentMissing;
+}
+
 int8_t AmsData::getLastError() {
-    return lastErrorCount > 3 ? lastError : 0;
+    return lastErrorCount > 2 ? lastError : 0;
 }
 
 void AmsData::setLastError(int8_t lastError) {
